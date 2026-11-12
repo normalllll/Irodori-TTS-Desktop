@@ -1,0 +1,291 @@
+{
+ "format_version": 1,
+ "repos": {
+  "Aratako/Irodori-TTS-v4.1-Small": {
+   "files": {
+    "model.safetensors": {
+     "sha256": "c85de88c01700cb53538e706f128ebcb1b8513ad21d7d0e75f58bc82cdbf89f6",
+     "size": 3064295596
+    },
+    "tokenizer/tokenizer.json": {
+     "sha256": "6a0734cf21c802169defaffe719bc2ef12bb9d0be37e54b61ed27aa89394723d",
+     "size": 6718495
+    },
+    "tokenizer/tokenizer_config.json": {
+     "sha256": "d229a271c64de1a7939d20d3665498e873fa91d5ee2edf135d73ec752cb9c9d3",
+     "size": 668
+    }
+   },
+   "revision": "2b28324dc263ed5e6638b3cf3dd94c82ead07b4b"
+  },
+  "Aratako/Irodori-TTS-v4.1-Small-MF": {
+   "files": {
+    "model.safetensors": {
+     "sha256": "a3f204b3ee06058f4e639a1af38408e7e3af5b6c75176897ecb8bfaaebb4fd54",
+     "size": 3093131788
+    },
+    "tokenizer/tokenizer.json": {
+     "sha256": "6a0734cf21c802169defaffe719bc2ef12bb9d0be37e54b61ed27aa89394723d",
+     "size": 6718495
+    },
+    "tokenizer/tokenizer_config.json": {
+     "sha256": "d229a271c64de1a7939d20d3665498e873fa91d5ee2edf135d73ec752cb9c9d3",
+     "size": 668
+    }
+   },
+   "revision": "ccc78f5d480b6e51b69b2d5042a14c4da04fea6e"
+  },
+  "Aratako/Irodori-TTS-v4.1-Small-Quantized": {
+   "files": {
+    "int8-weight-only/model.safetensors": {
+     "sha256": "1fb6394b52c11329fd19d6c6f388a1e224721752a32aad906cae8653f5b25dcc",
+     "size": 914316834
+    },
+    "tokenizer/tokenizer.json": {
+     "sha256": "6a0734cf21c802169defaffe719bc2ef12bb9d0be37e54b61ed27aa89394723d",
+     "size": 6718495
+    },
+    "tokenizer/tokenizer_config.json": {
+     "sha256": "d229a271c64de1a7939d20d3665498e873fa91d5ee2edf135d73ec752cb9c9d3",
+     "size": 668
+    }
+   },
+   "revision": "ef04e6c3ba56138ae23e86a2eabc004f76990e37"
+  },
+  "Aratako/Semantic-DACVAE-Japanese-32dim": {
+   "files": {
+    "weights.pth": {
+     "sha256": "db120339c5ee7eca1912cdf29bc612b947a0808e69c3cebfb4936b45a762c1d5",
+     "size": 429620065
+    }
+   },
+   "revision": "47376ee24834d7a05a48ebabfe3cde29b3c5e214"
+  },
+  "FunAudioLLM/Fun-ASR-Nano-2512": {
+   "files": {
+    "Qwen3-0.6B/config.json": {
+     "sha256": "660db3b73d788119c04535e48cf9be5f55bc3100841a718637ae695b442f27dd",
+     "size": 726
+    },
+    "Qwen3-0.6B/generation_config.json": {
+     "sha256": "2325da0f15bb848e018c5ae071b7943332e9f871d6b60e2ed22ca97d4cb993d2",
+     "size": 239
+    },
+    "Qwen3-0.6B/merges.txt": {
+     "sha256": "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5",
+     "size": 1671853
+    },
+    "Qwen3-0.6B/tokenizer.json": {
+     "sha256": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
+     "size": 11422654
+    },
+    "Qwen3-0.6B/tokenizer_config.json": {
+     "sha256": "d5d09f07b48c3086c508b30d1c9114bd1189145b74e982a265350c923acd8101",
+     "size": 9732
+    },
+    "Qwen3-0.6B/vocab.json": {
+     "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+     "size": 2776833
+    },
+    "config.yaml": {
+     "sha256": "daed38ea6484f5650fb32cbd9069b9aa13880acaf2bcb1f0bf4be2712837917c",
+     "size": 3140
+    },
+    "configuration.json": {
+     "sha256": "b64a3a55d35bcbe2cf4d31f2d3ef25a423d3ba2ebff203298c27fa055f3c7612",
+     "size": 398
+    },
+    "model.pt": {
+     "sha256": "55ae0d2fee369f0f11cce0795f6927934ad17cf11b278a7e56a51272074160bb",
+     "size": 1971149431
+    },
+    "multilingual.tiktoken": {
+     "sha256": "747979631e813193436aabcff7c1c235d37de8097b71c563ec8b63b7a515c718",
+     "size": 907395
+    }
+   },
+   "revision": "272c57b82523ada6fd87095e955f8e29100979ab"
+  },
+  "Qwen/Qwen3-ASR-1.7B": {
+   "files": {
+    "chat_template.json": {
+     "sha256": "75a8cfca24f00de72d796fbfed6858fc9614ef3dabd8696684cc3bc03a9c58ff",
+     "size": 1161
+    },
+    "config.json": {
+     "sha256": "2e74a751548b8ad7d7526d29365ad8144c345d8b412b1152d25dc6698452712f",
+     "size": 6194
+    },
+    "generation_config.json": {
+     "sha256": "1da527824d81e07118facff437e03f2e24a23311e3bdeb2368973fe77e5f275c",
+     "size": 142
+    },
+    "merges.txt": {
+     "sha256": "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5",
+     "size": 1671853
+    },
+    "model-00001-of-00002.safetensors": {
+     "sha256": "a4cd1f1a04d90b757dc7f7dd26254e69a013b19e80efe590a83c6a3bde8608d6",
+     "size": 4220320824
+    },
+    "model-00002-of-00002.safetensors": {
+     "sha256": "6e0b9d9e09e2e0238e7ef3cc8a484ab387e91b90f1900bedf88bc92d7929ccfc",
+     "size": 478200688
+    },
+    "model.safetensors.index.json": {
+     "sha256": "f994739fe38e5210b9e3e8ce6c6307315e2ceac3cb630e7b7414d69dce520f60",
+     "size": 64821
+    },
+    "preprocessor_config.json": {
+     "sha256": "45e120a4eda2c20c5d7f2ea9354e63536bf35e27aa573fb7cdf78017b378770d",
+     "size": 330
+    },
+    "tokenizer_config.json": {
+     "sha256": "4942d005604266809309cabc9f4e9cb89ce855d59b14681fdc0e1cc62ea26c4c",
+     "size": 12487
+    },
+    "vocab.json": {
+     "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+     "size": 2776833
+    }
+   },
+   "revision": "7278e1e70fe206f11671096ffdd38061171dd6e5"
+  },
+  "funasr/fsmn-vad": {
+   "files": {
+    "am.mvn": {
+     "sha256": "df189fd5f4352df84a0fd464eeab4e450a5e645665d6b38f13c832492261a739",
+     "size": 8033
+    },
+    "config.yaml": {
+     "sha256": "486861ca26ddb79081663b6179cb204c6bfae71c52f04aafc48a9e9d8dde1e93",
+     "size": 1215
+    },
+    "configuration.json": {
+     "sha256": "7bce8867e37d55c3dd8f672695ced18077a2be199ea529a5d432d5350fc0acba",
+     "size": 365
+    },
+    "model.pt": {
+     "sha256": "b3be75be477f0780277f3bae0fe489f48718f585f3a6e45d7dd1fbb1a4255fc5",
+     "size": 1721366
+    }
+   },
+   "revision": "df20e6b30c653645fa4ff125cacfcabd1020a669"
+  },
+  "litagin/anime-whisper": {
+   "files": {
+    "added_tokens.json": {
+     "sha256": "3c51f66c4c21f9e126970078f11ae77a78c74aee8df606ee9daba86e467108e0",
+     "size": 34648
+    },
+    "config.json": {
+     "sha256": "1b0bf54206d648763dbadbab3fc7ff0577b0f80224f002dbbe8d8c2caa147360",
+     "size": 1268
+    },
+    "generation_config.json": {
+     "sha256": "4e5bccc702f2322fcb497967cff54f890dcb3053c2993884e44313655fa951e0",
+     "size": 3898
+    },
+    "merges.txt": {
+     "sha256": "2df2990a395e35e8dfbc7511e08c12d56018d8d04691e0133e5d63b21e154dc6",
+     "size": 493869
+    },
+    "model.safetensors": {
+     "sha256": "15c672f0bf687b1c67aa14325f9c382c6919f1fce976f990513618b464a3c626",
+     "size": 3025686376
+    },
+    "normalizer.json": {
+     "sha256": "bf1c507dc8724ca9cf9903640dacfb69dae2f00edee4f21ceba106a7392f26dd",
+     "size": 52666
+    },
+    "preprocessor_config.json": {
+     "sha256": "7ccc62c6f2765af1f3b46c00c9b5894426835a05021c8b9c01eecb6dfb542711",
+     "size": 340
+    },
+    "special_tokens_map.json": {
+     "sha256": "baea4ea09372eb4fca86b4e4346139fd73cb807d5087e9de0948e971739c3e74",
+     "size": 2186
+    },
+    "tokenizer_config.json": {
+     "sha256": "c86c7398ba7f81f784569ea0ae165e252c4a006acc56906f04e5ee3300cf043e",
+     "size": 282863
+    },
+    "vocab.json": {
+     "sha256": "e2aa043ef015641d363d8288e7c241c85e36a5c761fb303598e0710233344387",
+     "size": 1036558
+    }
+   },
+   "revision": "22e2008a8182b357da3922a6308d095008f72973"
+  },
+  "openai/whisper-large-v3": {
+   "files": {
+    "added_tokens.json": {
+     "sha256": "3c51f66c4c21f9e126970078f11ae77a78c74aee8df606ee9daba86e467108e0",
+     "size": 34648
+    },
+    "config.json": {
+     "sha256": "ad0e8d1e46f4d01f7861a21509e5d0f977d6cc1f367a370603c92541d819807b",
+     "size": 1272
+    },
+    "generation_config.json": {
+     "sha256": "fbdfa70135de9b1d31553393f14e80aaeb1936ea36576b2ba864055943c09d23",
+     "size": 3903
+    },
+    "merges.txt": {
+     "sha256": "2df2990a395e35e8dfbc7511e08c12d56018d8d04691e0133e5d63b21e154dc6",
+     "size": 493869
+    },
+    "model.safetensors": {
+     "sha256": "a8e94b85976e5864ba3e9525c7e6c83b2a1eca42d4b797a0c7c24d778e40fd95",
+     "size": 3087130976
+    },
+    "normalizer.json": {
+     "sha256": "bf1c507dc8724ca9cf9903640dacfb69dae2f00edee4f21ceba106a7392f26dd",
+     "size": 52666
+    },
+    "preprocessor_config.json": {
+     "sha256": "7ccc62c6f2765af1f3b46c00c9b5894426835a05021c8b9c01eecb6dfb542711",
+     "size": 340
+    },
+    "special_tokens_map.json": {
+     "sha256": "1c70773c078cb2ca96e0fcff113102f1d3e2b1504272c3bb63b035d4a6700d87",
+     "size": 2072
+    },
+    "tokenizer.json": {
+     "sha256": "6d8cbd7cd0d8d5815e478dac67b85a26bbe77c1f5e0c6d76d1ce2abc0e5f21ca",
+     "size": 2480617
+    },
+    "tokenizer_config.json": {
+     "sha256": "844b642c73a91359722f47b35705f7174686df33d252695d8572cf9ac03a6389",
+     "size": 282843
+    },
+    "vocab.json": {
+     "sha256": "e2aa043ef015641d363d8288e7c241c85e36a5c761fb303598e0710233344387",
+     "size": 1036558
+    }
+   },
+   "revision": "06f233fe06e710322aca913c1bc4249a0d71fce1"
+  },
+  "sony/silentcipher": {
+   "files": {
+    "44_1_khz/73999_iteration/dec_c.ckpt": {
+     "sha256": "c23b57635172b2fbd3a8531d15ba76b5885a10d0fe902ccb823c521c56041b33",
+     "size": 2008794
+    },
+    "44_1_khz/73999_iteration/dec_m_0.ckpt": {
+     "sha256": "829540c058270d29788f05294894d45bf436e44add0e1099422242ebb94b7088",
+     "size": 9554818
+    },
+    "44_1_khz/73999_iteration/enc_c.ckpt": {
+     "sha256": "ff64f80d2391fdfc888e4103c499be4a2c958e59626587a1eab6db93204814c7",
+     "size": 184765
+    },
+    "44_1_khz/73999_iteration/hparams.yaml": {
+     "sha256": "27735fd4db0c00c29fef7af872ad1e5efe854e48d530a86c75beac2b87f09ce3",
+     "size": 1474
+    }
+   },
+   "revision": "a1c4d021905e0dc5b24be5f68db5fc4dba410ee1"
+  }
+ }
+}

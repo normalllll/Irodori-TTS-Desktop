@@ -1,0 +1,24 @@
+# Local environments, downloaded resources and acceptance artifacts
+.venv/
+.cache/
+/runtime/
+outputs/
+/data/
+dist/
+build/
+*.egg-info/
+__pycache__/
+*.py[cod]
+.ruff_cache/
+.pytest_cache/
+*.lock
+migration-backups/
+# Local editor/credential files
+.env
+.env.*
+.aws/
+.codex/
+.agents/
+
+# Working notes, kept out of the repository
+docs/

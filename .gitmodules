@@ -1,0 +1,3 @@
+[submodule "upstream/Irodori-TTS"]
+	path = upstream/Irodori-TTS
+	url = https://github.com/normalllll/Irodori-TTS.git
