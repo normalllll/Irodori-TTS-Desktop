@@ -1,6 +1,6 @@
 [project]
 name = "irodori-tts-desktop"
-version = "0.1.0"
+version = "0.1.1"
 description = "Fluent desktop application with a pinned Irodori-TTS computation baseline"
 readme = "README.md"
 license = "GPL-3.0-only"
