@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 
 UPSTREAM_URL = "https://github.com/normalllll/Irodori-TTS.git"
-UPSTREAM_COMMIT = "6d23eaefa34e4f0d1671afbcc13b5c6d2e6b98cd"
+UPSTREAM_COMMIT = "18b55648051e7494ee3501852e631aadc91c581c"
 SOURCE_ROOT = Path(__file__).resolve().parents[1]
 _checkout = SOURCE_ROOT / "upstream/Irodori-TTS"
 UPSTREAM_ROOT = _checkout if (_checkout / "irodori_tts/model.py").is_file() else SOURCE_ROOT
