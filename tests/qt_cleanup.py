@@ -8,16 +8,25 @@ import time
 
 def stub_connection_check():
     """The guide checks Hugging Face over the network, which takes up to ~10 s, longer than
-    cleanup_qt waits for background jobs: window tests get an instant answer instead. Returns
-    the started patcher."""
+    cleanup_qt waits for background jobs: window tests get an instant answer instead. Settings
+    asks Hugging Face for the latest commit of each installed catalog base; there it finds
+    none, so no update is offered. Returns the started patchers, stopped together by stop()."""
+    from types import SimpleNamespace
     from unittest.mock import patch
 
-    patcher = patch(
-        "irodori_tts.desktop.guide_page.check_hugging_face",
-        return_value={"reachable": True, "latency_ms": 1, "reason": None, "status": None},
-    )
-    patcher.start()
-    return patcher
+    patchers = [
+        patch(
+            "irodori_tts.desktop.guide_page.check_hugging_face",
+            return_value={"reachable": True, "latency_ms": 1, "reason": None, "status": None},
+        ),
+        patch(
+            "irodori_tts.desktop.base_models.latest_revision",
+            side_effect=OSError("no network in tests"),
+        ),
+    ]
+    for patcher in patchers:
+        patcher.start()
+    return SimpleNamespace(stop=lambda: [patcher.stop() for patcher in patchers])
 
 
 def stop_manager(manager):

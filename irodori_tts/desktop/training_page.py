@@ -39,10 +39,10 @@ from qfluentwidgets import (
 
 from irodori_tts.desktop.messages import BusinessError, error_message, fmt, t
 
-from . import asr, model_files
+from . import asr, base_models, model_files
 from .asr_dialog import ask_transcription, choose_recordings_folder, recordings_start
 from .exports import export_project, export_voice, register_checkpoint_voice
-from .i18n import add_item, bind, clear_text, set_text
+from .i18n import add_item, bind, clear_items, clear_text, set_text
 from .materials import (
     MAX_TEXT_LENGTH,
     clean_field,
@@ -53,7 +53,6 @@ from .materials import (
     needs_review,
     remove_materials,
 )
-from .resources import MODEL_REPO, MODEL_REVISION
 from .storage import (
     load_project,
     project_lock,
@@ -1704,7 +1703,7 @@ class TrainingPage(QWidget):
             if size
             else t("training_page.preprocess_facts_empty"),
         )
-        speech = model_files.speech_ready()
+        speech = model_files.speech_ready(self.host.resource_root)
         self.init_notice.setVisible(not speech)
         busy = self.host.tasks.busy
         # Data that matches the recordings needs no second run: the way on is training.
@@ -1847,6 +1846,8 @@ class TrainingPage(QWidget):
         body.setContentsMargins(0, 0, 0, 0)
         body.setSpacing(12)
         self.voice_name = smooth(LineEdit())
+        # The base a new run trains on; the run keeps it for good.
+        self.run_base = combo_box()
         self.preset = combo_box()
         add_item(self.preset, t("training_page.recommended"), userData={})
         for name, config in self.host.store.settings.get("presets", {}).items():
@@ -1868,6 +1869,7 @@ class TrainingPage(QWidget):
                     ),
                     buddy=self.preset,
                 ),
+                field(t("generation_page.base_model"), self.run_base),
             )
         )
         # The settings that depend on the card and the recordings start empty. While one is,
@@ -2126,15 +2128,18 @@ class TrainingPage(QWidget):
         if not self.included_count():
             raise BusinessError(t("training_page.nothing_included"))
         settings = self.values()
+        # Without an installed base the plan is the default base's.
+        base = next((b for b in self.host.bases() if b.id == self.run_base.currentData()), None)
         clear_text(self.start_error)
         task = self.host.tasks.start(
             {
                 "kind": "recommend",
                 "project": str(self.root),
                 "settings": settings,
+                "base": base_models.base_record(base) if base else None,
             }
         )
-        self.recommendation_request = (task["id"], self.root, settings)
+        self.recommendation_request = (task["id"], self.root, settings, base and base.id)
         self.update_recommendation()
 
     def recommendation_finished(self, task):
@@ -2152,6 +2157,7 @@ class TrainingPage(QWidget):
         result = task["result"]
         if (
             self.values() != request[2]
+            or self.run_base.currentData() != request[3]
             or materials_fingerprint(self.project) != result["fingerprint"]
         ):
             set_text(self.start_error, t("training_page.recommendation_changed"))
@@ -2189,6 +2195,11 @@ class TrainingPage(QWidget):
                 "training_page.recommendation_material_notes",
                 duplicates=duplicates,
                 review=result["review_count"],
+            )
+        if result.get("memory_short"):
+            self.recommendation_basis += t(
+                "training_page.recommendation_memory_short",
+                need=fmt(result["base_memory_gib"][0], ".1f", -1),
             )
         self.update_recommendation()
 
@@ -2287,6 +2298,7 @@ class TrainingPage(QWidget):
             self.host.project_states[self.project["id"]] = self.snapshot()
         self.root = root
         self.project = load_project(root)
+        self.refresh_bases()
         if changed:
             self.material_id = None
             self.material_text.clear()
@@ -2410,7 +2422,14 @@ class TrainingPage(QWidget):
         if not item:
             self.refresh_controls()
             return
-        set_text(self.run_title, item["name"])
+        base = base_models.normalize_record(item.get("base")) or {}
+        name = base.get("name") or base.get("repo")
+        set_text(
+            self.run_title,
+            t("common.task_state", name=fmt(item["name"], "", -1), state=fmt(name, "", -1))
+            if name
+            else item["name"],
+        )
         task = self.active_run()
         step = task["step"] if task else item["step"]
         total = task.get("total") or item["total"] if task else item["total"]
@@ -2610,7 +2629,7 @@ class TrainingPage(QWidget):
         item = self.runs.item()
         here = self.active_run() is not None
         can_resume = bool(item and self.can_resume(item))
-        speech = model_files.speech_ready()
+        speech = model_files.speech_ready(self.host.resource_root)
         self.train_notice.setVisible(not speech)
         count = self.included_count()
         problems = len(self.problem_items()) if self.project else 0
@@ -2801,10 +2820,16 @@ class TrainingPage(QWidget):
             if not clean_field(self.voice_name.text()):
                 raise BusinessError(t("training.enter_a_voice_name"))
             normalize_preset(self.values(), max(1, self.included_count()))
-            self.initialize(then={"name": self.voice_name.text(), "values": self.values()})
+            self.initialize(
+                then={
+                    "name": self.voice_name.text(),
+                    "values": self.values(),
+                    "base": self.run_base.currentData(),
+                }
+            )
             self.tabs.setCurrentIndex(1)
             return
-        self.create_and_train(self.voice_name.text(), self.values())
+        self.create_and_train(self.voice_name.text(), self.values(), self.chosen_base().id)
 
     def continue_training(self, task):
         """Preprocessing that was started by Start training has finished: start the run."""
@@ -2816,7 +2841,9 @@ class TrainingPage(QWidget):
         if root != self.root:
             self.host.models.select_project(root)
         self.tabs.setCurrentIndex(2)
-        self.host.perform(lambda: self.create_and_train(then["name"], then["values"]), None)
+        self.host.perform(
+            lambda: self.create_and_train(then["name"], then["values"], then.get("base")), None
+        )
 
     def included_count(self):
         return sum(item["included"] for item in (self.project or {}).get("materials", []))
@@ -2844,13 +2871,34 @@ class TrainingPage(QWidget):
             raise BusinessError(t("asr.wait_for_the_running_task"))
         self.host.tasks.start(payload)
 
-    def create_and_train(self, name, values):
+    def refresh_bases(self):
+        """The installed bases a new run can train on; the generation base comes first."""
+        bases = self.host.bases()
+        old = self.run_base.currentData() or self.host.store.settings.get("generation_base")
+        self.run_base.blockSignals(True)
+        clear_items(self.run_base)
+        for base in bases:
+            add_item(self.run_base, base.name, userData=base.id)
+        self.run_base.setCurrentIndex(max(0, self.run_base.findData(old)))
+        self.run_base.blockSignals(False)
+
+    def chosen_base(self, base_id=None):
+        """The installed base of base_id, or the one the new-run form chooses."""
+        bases = self.host.bases()
+        wanted = base_id or self.run_base.currentData()
+        base = next((b for b in bases if b.id == wanted), None) or (bases[0] if bases else None)
+        if base is None:
+            raise BusinessError(t("resources.resources_are_not_ready_choose_prepare_resources"))
+        return base
+
+    def create_and_train(self, name, values, base_id=None):
         root = self.require()
-        repo, resources = self.host.repo, self.host.store.root / "resources"
+        resources = self.host.resource_root
+        base = self.chosen_base(base_id)
 
         def create():
             with project_lock(root):
-                run = create_run(root, name, values, repo, resources)
+                run = create_run(root, name, values, base, resources)
                 # Run folders use human-readable names; selection uses the stable record ID.
                 return run, read_json(run / "run.json")["id"]
 
@@ -2890,10 +2938,11 @@ class TrainingPage(QWidget):
             return
         root, run_root = self.root, Path(item["run_root"])
         total, save_every = dialog.total.value(), dialog.save_every.value()
+        bases = self.host.bases()
 
         def extend():
             with project_lock(root):
-                extend_run(root, run_root, total, save_every)
+                extend_run(root, run_root, total, save_every, bases)
 
         def extended(_done):
             if self.root == root:
@@ -2911,9 +2960,10 @@ class TrainingPage(QWidget):
         if not item:
             raise BusinessError(t("training_page.select_a_training_run_to_resume"))
         root = self.root
+        bases = self.host.bases()
         clear_text(self.train_error)
         self.checking_training(
-            lambda: resume_eligibility(root, item),
+            lambda: resume_eligibility(root, item, bases),
             lambda _checked: self.start_train_task(
                 {"kind": "train", "project": str(root), "run": item["run_root"], "resume": True}
             ),
@@ -2927,11 +2977,11 @@ class TrainingPage(QWidget):
         self.host.preview(self.root, Path(item["run_root"]), checkpoint=Path(checkpoint))
 
     def usable(self, item):
-        """Whether the run has a complete checkpoint on the current base model to speak with."""
+        """Whether the run has a complete checkpoint and an installed base to speak with."""
         return bool(
             self.root
             and item.get("checkpoint")
-            and item.get("base") == {"repo": MODEL_REPO, "revision": MODEL_REVISION}
+            and base_models.match_record(item.get("base"), self.host.bases()).base is not None
             and complete_checkpoint(self.root / item["checkpoint"])
         )
 

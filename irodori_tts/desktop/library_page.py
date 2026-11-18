@@ -18,6 +18,7 @@ from qfluentwidgets.common.style_sheet import setCustomStyleSheet
 
 from irodori_tts.desktop.messages import BusinessError, fmt, t
 
+from . import base_models
 from .exports import export_voice, import_voice, voice_candidates
 from .i18n import set_text
 from .storage import project_lock, read_json, removable, remove_tree, tree_size, write_json
@@ -110,6 +111,7 @@ class ImportedModel(QWidget):
         self.facts = KeyValues(
             [
                 ("project", t("library_page.source")),
+                ("base", t("generation_page.base_model")),
                 ("step", t("library_page.training_steps")),
                 ("parameters", t("library_page.parameters")),
                 ("file", t("library_page.file")),
@@ -171,6 +173,16 @@ class ImportedModel(QWidget):
         self.item = item
         set_text(self.title, item["name"])
         self.facts.set("project", item.get("project_name") or t("app.imported_voice"))
+        # One line: the base's name and how it stands; Generate says what to do about it.
+        base = base_models.voice_base(item.get("base"), self.host.bases())
+        note = base["base_note"]
+        if base["base_id"] is None:
+            note = t("library_page.base_not_installed")
+        name = base["base_name"] or "—"
+        self.facts.set(
+            "base",
+            t("common.task_state", name=fmt(name, "", -1), state=note) if note else name,
+        )
         self.facts.set("step", str(item.get("step", "—")))
         self.facts.set("parameters", parameters(item.get("metadata")))
         self.facts.set("file", item.get("adapter", "—"))
@@ -548,7 +560,9 @@ class ModelsPage(QWidget):
         if path:
             source = Path(path)
             self.host.run_io(
-                lambda: voice_candidates(source, self.host.store.root / "voices"),
+                lambda: voice_candidates(
+                    source, self.host.store.root / "voices", self.host.bases()
+                ),
                 lambda found: self.import_found(source, found),
                 None,
                 busy=t("app.work_import_voice"),
@@ -584,7 +598,9 @@ class ModelsPage(QWidget):
                 kind="warning",
             )
         self.host.run_io(
-            lambda: import_voice(source, self.host.store.root / "voices", folder),
+            lambda: import_voice(
+                source, self.host.store.root / "voices", folder, self.host.bases()
+            ),
             self.imported_done,
             None,
             busy=t("app.work_import_voice"),

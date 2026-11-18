@@ -316,10 +316,6 @@ Saved checkpoints are kept and can be resumed from the training history.</transl
       <translation>Unsupported project package format</translation>
     </message>
     <message>
-      <source>exports.this_voice_uses_a_different_base_model</source>
-      <translation>This model was trained on a different base model version</translation>
-    </message>
-    <message>
       <source>exports.partial_downloads</source>
       <translation>Partial downloads</translation>
     </message>
@@ -2022,10 +2018,6 @@ The model listed in the library from this record is removed too.</translation>
       <translation>Changes are saved automatically</translation>
     </message>
     <message>
-      <source>settings_page.model_name</source>
-      <translation>Irodori TTS v4.1 Small</translation>
-    </message>
-    <message>
       <source>settings_page.codec_name</source>
       <translation>DACVAE Japanese 32dim</translation>
     </message>
@@ -2607,10 +2599,6 @@ The model listed in the library from this record is removed too.</translation>
       <translation>Download transcription models</translation>
     </message>
     <message>
-      <source>models.speech_title</source>
-      <translation>Base model (Irodori TTS, codec, watermark)</translation>
-    </message>
-    <message>
       <source>models.speech_reason</source>
       <translation>Required: without it nothing can be generated or trained.</translation>
     </message>
@@ -2806,7 +2794,7 @@ Another computer imports it with "Import model files".</translation>
     </message>
     <message>
       <source>guide.import_hint</source>
-      <translation>Every file is checked against the pinned version, whether downloaded or imported. A download that stops continues where it ended.</translation>
+      <translation>Base models download their latest version and are checked against its checksums; other models are checked against a pinned version. A download that stops continues where it ended.</translation>
     </message>
     <message>
       <source>guide.ready</source>
@@ -3353,6 +3341,11 @@ Open the project again to bring it back.</translation>
 Material review: {duplicates} repeated texts, {review} transcripts awaiting review.</translation>
     </message>
     <message>
+      <source>training_page.recommendation_memory_short</source>
+      <translation>
+This base model needs about {need} GB of free video memory even at batch 1 with checkpointing; with less, training will likely run out of memory. Close other programs that use the GPU, or train on a smaller base model.</translation>
+    </message>
+    <message>
       <source>training_page.recommendation_running</source>
       <translation>Reading recording statistics and GPU information… Recommended settings will be filled together when ready.</translation>
     </message>
@@ -3389,19 +3382,19 @@ First-run budget; compare generated samples to choose a checkpoint.</translation
     </message>
     <message>
       <source>models.low_vram_title</source>
-      <translation>Low video memory model</translation>
+      <translation>{name}: low video memory</translation>
     </message>
     <message>
       <source>models.low_vram_reason</source>
-      <translation>Generates with about a quarter less video memory; training still uses the speech model.</translation>
+      <translation>Generates with about a quarter less video memory; training still uses the base model.</translation>
     </message>
     <message>
       <source>models.fast_title</source>
-      <translation>Fast model</translation>
+      <translation>{name}: fast</translation>
     </message>
     <message>
       <source>models.fast_reason</source>
-      <translation>Generates in 4 sampling steps instead of 40; training still uses the speech model.</translation>
+      <translation>Generates in 4 sampling steps instead of 40; training still uses the base model.</translation>
     </message>
     <message>
       <source>settings_page.generation_model</source>
@@ -3409,7 +3402,7 @@ First-run budget; compare generated samples to choose a checkpoint.</translation
     </message>
     <message>
       <source>settings_page.generation_model_hint</source>
-      <translation>Less video memory and Fast take effect once their model is downloaded in Getting started.</translation>
+      <translation>Less video memory and Fast apply to the base models whose model for it is downloaded in Getting started; the others use their standard model.</translation>
     </message>
     <message>
       <source>settings_page.model_standard</source>
@@ -3652,10 +3645,6 @@ First-run budget; compare generated samples to choose a checkpoint.</translation
       <translation>Cannot tell which base model this LoRA was trained for: its config.json is missing.</translation>
     </message>
     <message>
-      <source>exports.voice_for_another_base_model</source>
-      <translation>This LoRA was trained for {model}. This app works with {supported}, so it cannot be used.</translation>
-    </message>
-    <message>
       <source>library_page.voice_import_files</source>
       <translation>Model packages and LoRAs (*.irovoice *.zip *.7z *.rar adapter_config.json)</translation>
     </message>
@@ -3674,6 +3663,123 @@ First-run budget; compare generated samples to choose a checkpoint.</translation
     <message>
       <source>widgets.choose</source>
       <translation>Choose</translation>
+    </message>
+    <message>
+      <source>base_models.base_not_recorded</source>
+      <translation>This voice does not say which base model it was trained on, so it cannot be used.</translation>
+    </message>
+    <message>
+      <source>base_models.generation_base_missing</source>
+      <translation>The base model this voice needs is not installed. Download or import it, then retry.</translation>
+    </message>
+    <message>
+      <source>base_models.import_no_architecture</source>
+      <translation>{file} is not an Irodori TTS base model: its header does not describe the model.</translation>
+    </message>
+    <message>
+      <source>base_models.import_no_tokenizer</source>
+      <translation>A base model needs its tokenizer folder (tokenizer/tokenizer_config.json) next to {file}.</translation>
+    </message>
+    <message>
+      <source>base_models.needs_catalog_base</source>
+      <translation>Needs the base model {name}. Download it in Getting started.</translation>
+    </message>
+    <message>
+      <source>base_models.needs_unknown_base</source>
+      <translation>Needs a base model that is not installed ({name}). Import the base model this voice was trained on in Settings.</translation>
+    </message>
+    <message>
+      <source>base_models.trained_on_other_version</source>
+      <translation>Trained on another version of this base model.</translation>
+    </message>
+    <message>
+      <source>base_models.unknown_catalog_base</source>
+      <translation>{name} is not a base model this application can download.</translation>
+    </message>
+    <message>
+      <source>base_models.variant_needs_base</source>
+      <translation>Download the base model {name} first.</translation>
+    </message>
+    <message>
+      <source>common.lines</source>
+      <translation>{p0}
+{p1}</translation>
+    </message>
+    <message>
+      <source>generation_page.base_model</source>
+      <translation>Base model</translation>
+    </message>
+    <message>
+      <source>generation_page.variant_not_installed</source>
+      <translation>{name} has no {model} model installed; its standard model is used.</translation>
+    </message>
+    <message>
+      <source>generation_page.voice_base</source>
+      <translation>Base model: {name}</translation>
+    </message>
+    <message>
+      <source>models.base_title</source>
+      <translation>{name}</translation>
+    </message>
+    <message>
+      <source>models.large_reason</source>
+      <translation>Optional. Larger and slower than Small, with more video memory: training needs a card with 16 GB or more. Used under the &lt;a href="{url}"&gt;Gemma terms of use&lt;/a&gt;.</translation>
+    </message>
+    <message>
+      <source>settings_page.base_imported</source>
+      <translation>Imported</translation>
+    </message>
+    <message>
+      <source>settings_page.base_imported_as</source>
+      <translation>Base model {name} imported.</translation>
+    </message>
+    <message>
+      <source>settings_page.base_update</source>
+      <translation>Update to {revision}</translation>
+    </message>
+    <message>
+      <source>settings_page.base_version</source>
+      <translation>Version</translation>
+    </message>
+    <message>
+      <source>settings_page.import_base</source>
+      <translation>Import base model…</translation>
+    </message>
+    <message>
+      <source>settings_page.import_base_file</source>
+      <translation>A model file (.safetensors)…</translation>
+    </message>
+    <message>
+      <source>settings_page.import_base_folder</source>
+      <translation>A model folder…</translation>
+    </message>
+    <message>
+      <source>settings_page.remove_base_message</source>
+      <translation>Removes {name} from this computer. Voices trained on it need it again to speak.</translation>
+    </message>
+    <message>
+      <source>settings_page.safetensors_filter</source>
+      <translation>Base model (*.safetensors)</translation>
+    </message>
+    <message>
+      <source>settings_page.work_import_base</source>
+      <translation>Importing the base model</translation>
+    </message>
+    <message>
+      <source>training.base_does_not_match_run</source>
+      <translation>The run's model settings do not match its base model. Start a new training run.</translation>
+    </message>
+    <message>
+      <source>training.base_not_installed</source>
+      <translation>This run trains on {name}, which is not installed. {hint}</translation>
+    </message>
+    <message>
+      <source>library_page.base_not_installed</source>
+      <translation>Not installed</translation>
+    </message>
+    <message>
+      <source>worker.adapter_for_another_base</source>
+      <translation>This voice was trained on another base model ({adapter}) and cannot run on {base}.</translation>
     </message>
   </context>
 </TS>

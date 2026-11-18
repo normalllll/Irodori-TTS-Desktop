@@ -16,13 +16,12 @@ from qfluentwidgets import FluentIcon, InfoBar, InfoBarPosition, ToolTipFilter
 
 from irodori_tts.desktop.messages import BusinessError, fmt, t
 
-from . import asr, model_files
+from . import asr, base_models, model_files
 from .asr_dialog import human_size
 from .exports import cuda_of, export_diagnostics, storage_entries
 from .i18n import add_item, bind, clear_text, set_text
 from .resources import (
     CODEC_REVISION,
-    MODEL_REVISION,
     hf_home,
     remove_snapshot,
     resource_state,
@@ -38,6 +37,7 @@ from .widgets import (
     button,
     card,
     card_header,
+    choose_folder,
     combo_box,
     elided_label,
     error_label,
@@ -45,9 +45,11 @@ from .widgets import (
     grid,
     icon_button,
     label,
+    open_file,
     row,
     save_file,
     show_log,
+    show_menu,
     swatch,
     switch,
 )
@@ -150,16 +152,29 @@ class SettingsPage(Page):
         header = card_header(t("exports.model_resources"), self.resource_error)
         self.resource_status = header.meta
         body.addWidget(header)
+        # The installed base models: each with its commit (or that it was imported), the
+        # update its repository offers, and its removal.
+        self.base_table = Table(
+            [
+                ("name", t("generation_page.base_model"), 0),
+                ("version", t("settings_page.base_version"), 120),
+                ("actions", "", 84),
+            ],
+            fill=True,
+            header=False,
+            stretch=0,
+        )
+        self.base_table.set_row_actions(self.base_actions, for_rows="all")
+        self.base_table.setFixedHeight(120)
+        body.addWidget(self.base_table)
+        self.latest = {}
+        self.latest_checked = False
         lines = []
-        for title, revision in (
-            (t("settings_page.model_name"), MODEL_REVISION),
-            (t("settings_page.codec_name"), CODEC_REVISION),
-        ):
-            # The pinned revision is for support, not for reading: show its short form.
-            value = elided_label(revision[:12], emphasis=True)
-            value.setToolTip(revision)
-            value.installEventFilter(ToolTipFilter(value, 300))
-            lines.append((title, value, False))
+        # The pinned revision is for support, not for reading: show its short form.
+        value = elided_label(CODEC_REVISION[:12], emphasis=True)
+        value.setToolTip(CODEC_REVISION)
+        value.installEventFilter(ToolTipFilter(value, 300))
+        lines.append((t("settings_page.codec_name"), value, False))
         lines.append(
             # The files live in the shared download cache, not in the data folder.
             (t("settings_page.cache_location"), PathField(hf_home() / "hub"), False)
@@ -189,7 +204,19 @@ class SettingsPage(Page):
             lambda: self.host.perform(self.host.guide.export, self.resource_error),
             icon=FluentIcon.SHARE,
         )
-        body.addWidget(row(self.import_models_button, self.export_models_button, None))
+        self.import_base_button = button(
+            t("settings_page.import_base"),
+            lambda: self.choose_base_import(),
+            icon=FluentIcon.ADD,
+        )
+        body.addWidget(
+            row(
+                self.import_models_button,
+                self.export_models_button,
+                self.import_base_button,
+                None,
+            )
+        )
         self.resources_ready = False
         self.resources_size = None
 
@@ -368,6 +395,143 @@ class SettingsPage(Page):
                     }
                 )
         return rows
+
+    def base_rows(self):
+        rows = []
+        for base in self.host.bases():
+            version = (
+                base.revision[:12]
+                if base.source == "catalog" and base.revision
+                else t("settings_page.base_imported")
+            )
+            rows.append(
+                {
+                    "id": base.id,
+                    "name": base.name,
+                    "version": version,
+                    "tooltip": str(base.checkpoint),
+                    "tones": {"version": "muted"},
+                }
+            )
+        return rows
+
+    def check_updates(self):
+        """Ask each installed catalog base's repository for its latest commit, once a session
+        and only when Hugging Face answers: an update is offered when it differs."""
+        bases = [base for base in self.host.bases() if base.source == "catalog"]
+        if self.latest_checked or not bases:
+            return
+        self.latest_checked = True
+
+        def latest():
+            found = {}
+            for base in bases:
+                try:
+                    found[base.id] = base_models.latest_revision(base.repo)
+                except Exception:
+                    continue
+            return found
+
+        def checked(found):
+            self.latest = found
+            self.base_table.update_rows(self.base_rows())
+
+        self.host.run_io(latest, checked, None, blocking=False)
+
+    def base_actions(self, item):
+        box = QWidget()
+        layout = QHBoxLayout(box)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addStretch(1)
+        base = next((b for b in self.host.bases() if b.id == item["id"]), None)
+        latest = self.latest.get(item["id"])
+        if base is not None and base.source == "catalog" and latest and latest != base.revision:
+            layout.addWidget(
+                icon_button(
+                    FluentIcon.UPDATE,
+                    t("settings_page.base_update", revision=fmt(latest[:12], "", -1)),
+                    lambda: self.host.perform(lambda: self.update_base(item), self.resource_error),
+                    size=28,
+                )
+            )
+        layout.addWidget(
+            icon_button(
+                FluentIcon.DELETE,
+                t("asr.remove"),
+                lambda: self.host.perform(lambda: self.remove_base(item), self.resource_error),
+                size=28,
+            )
+        )
+        return box
+
+    def update_base(self, item):
+        if self.host.tasks.busy:
+            raise BusinessError(t("settings_page.wait_for_compute_or_download_tasks_before"))
+        clear_text(self.resource_error)
+        self.host.tasks.start({"kind": "resources", "bases": [item["id"]], "update": True})
+
+    def remove_base(self, item):
+        if self.host.tasks.busy:
+            raise BusinessError(t("settings_page.wait_for_compute_or_download_tasks_before"))
+        base = next((b for b in self.host.bases() if b.id == item["id"]), None)
+        if base is None:
+            return
+        if not self.host.confirm(
+            t("asr.remove_title", name=fmt(base.name, "", -1)),
+            t("settings_page.remove_base_message", name=fmt(base.name, "", -1)),
+            t("asr.remove"),
+        ):
+            return
+        root = self.host.resource_root
+
+        def remove():
+            if base.source == "imported":
+                base_models.delete_imported(root, base)
+            else:
+                base_models.remove_catalog_files(root, base)
+
+        self.host.run_io(remove, lambda _done: self.host.refresh(), self.resource_error)
+
+    def choose_base_import(self):
+        show_menu(
+            self.import_base_button,
+            [
+                (t("settings_page.import_base_folder"), self.import_base_folder, True),
+                (t("settings_page.import_base_file"), self.import_base_file, True),
+            ],
+        )
+
+    def import_base_folder(self):
+        path = choose_folder(self, self.host.store.settings, t("settings_page.import_base"))
+        if path:
+            self.host.perform(lambda: self.import_base(Path(path)), self.resource_error)
+
+    def import_base_file(self):
+        path = open_file(
+            self,
+            self.host.store.settings,
+            t("settings_page.import_base"),
+            t("settings_page.safetensors_filter"),
+        )
+        if path:
+            self.host.perform(lambda: self.import_base(Path(path)), self.resource_error)
+
+    def import_base(self, source):
+        if self.host.tasks.busy:
+            raise BusinessError(t("settings_page.wait_for_compute_or_download_tasks_before"))
+        clear_text(self.resource_error)
+        root = self.host.resource_root
+
+        def imported(base):
+            self.host.refresh()
+            self.host.notify(t("settings_page.base_imported_as", name=fmt(base.name, "", -1)))
+
+        self.host.run_io(
+            lambda: base_models.import_base(source, root),
+            imported,
+            self.resource_error,
+            busy=t("settings_page.work_import_base"),
+        )
 
     def asr_actions(self, item):
         box = QWidget()
@@ -624,8 +788,12 @@ class SettingsPage(Page):
             busy=t("app.work_cleaning"),
         )
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.check_updates()
+
     def refresh(self):
-        ready, size = resource_state(self.host.store.root / "resources")
+        ready, size = resource_state(self.host.resource_root)
         manifest = size is not None
         if manifest:
             set_text(
@@ -641,6 +809,7 @@ class SettingsPage(Page):
         else:
             set_text(self.resource_status, t("settings_page.resources_not_downloaded"))
         self.asr_files.update_rows(self.asr_rows())
+        self.base_table.update_rows(self.base_rows())
         self.resources_ready = ready
         self.resources_size = size if manifest else None
         self.resource_status.setTextColor(
@@ -660,6 +829,7 @@ class SettingsPage(Page):
             self.repair_button,
             self.import_models_button,
             self.export_models_button,
+            self.import_base_button,
         ):
             widget.setEnabled(not busy)
         task = self.host.tasks.current

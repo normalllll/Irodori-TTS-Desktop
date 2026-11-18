@@ -36,9 +36,17 @@ The transcription check needs reference data under `outputs/asr-bench/ref`.
 
 ## Models and add-ons
 
-Every model file is checked against `irodori_tts/desktop/model_pins.json`. After changing a
-pinned revision or file list, run `python -m scripts.pin_models`;
-`python -m scripts.pin_models --check --offline` fails when the file is out of date.
+The codec, watermark and speech recognition model files are checked against
+`irodori_tts/desktop/model_pins.json`. After changing a pinned revision or file list, run
+`python -m scripts.pin_models`; `python -m scripts.pin_models --check --offline` fails when the
+file is out of date.
+
+Base speech models are not pinned. The catalog in `irodori_tts/desktop/base_models.py` names
+their repositories, and the app downloads the latest commit and records it in the resource
+folder's `base-models.json`. A base is identified by the architecture in its checkpoint's
+`config_json` metadata, and voices are matched to bases by it. Keep the `tokenizer/` folder
+beside every base checkpoint: without it the runtime fetches the tokenizer from the text
+encoder's repository, which for v4 Large is gated.
 
 Qwen3-ASR and Fun-ASR need packages that conflict with the app's own. They are installed as
 add-ons under `<cache>/addons` and put in front of `PYTHONPATH` only in the worker that uses

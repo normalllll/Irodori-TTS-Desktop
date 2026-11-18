@@ -94,6 +94,51 @@ class PlanningTests(unittest.TestCase):
                 material_profile(project_with_lengths(lengths)["materials"])
 
 
+class BaseMemoryTests(unittest.TestCase):
+    def test_the_runs_base_sets_the_memory_envelope(self):
+        from irodori_tts.desktop.base_models import (
+            LARGE_ARCHITECTURE,
+            SMALL_ARCHITECTURE,
+            catalog_base,
+        )
+        from irodori_tts.desktop.training_recommendation import base_memory
+
+        large = {"id": "v4-large", "architecture": LARGE_ARCHITECTURE}
+        self.assertEqual(base_memory(large), catalog_base("v4-large").training_memory)
+        self.assertEqual(base_memory(None), catalog_base("v4.1-small").training_memory)
+        # A legacy record resolves by its repository.
+        legacy = {"repo": "Aratako/Irodori-TTS-v4.1-Small", "revision": "r"}
+        self.assertEqual(base_memory(legacy), (4.0, 1.0))
+        # A base outside the catalog scales Small's envelope by width times depth.
+        imported = {
+            "id": "imported-aaaaaaaaaaaa",
+            "architecture": {**SMALL_ARCHITECTURE, "model_dim": 2560, "num_layers": 12},
+        }
+        self.assertEqual(base_memory(imported), (8.0, 2.0))
+
+    def test_a_larger_base_gets_a_smaller_physical_batch(self):
+        from irodori_tts.desktop.base_models import LARGE_ARCHITECTURE
+
+        project = project_with_lengths([3] * 50)
+        small = plan_training(project, {}, gpu(free=16))
+        large = plan_training(
+            project, {}, gpu(free=16), {"id": "v4-large", "architecture": LARGE_ARCHITECTURE}
+        )
+        self.assertLess(large["values"]["batch_size"], small["values"]["batch_size"])
+        self.assertEqual(large["values"]["max_steps"], small["values"]["max_steps"])
+        self.assertEqual(large["base_memory_gib"], [13.5, 3.0])
+        self.assertFalse(large["memory_short"])
+
+    def test_a_base_whose_fixed_memory_exceeds_the_free_memory_is_flagged(self):
+        from irodori_tts.desktop.base_models import LARGE_ARCHITECTURE
+
+        project = project_with_lengths([3] * 50)
+        large = {"id": "v4-large", "architecture": LARGE_ARCHITECTURE}
+        self.assertTrue(plan_training(project, {}, gpu(free=12), large)["memory_short"])
+        self.assertFalse(plan_training(project, {}, gpu(free=12))["memory_short"])
+        self.assertFalse(plan_training(project, {}, None, large)["memory_short"])
+
+
 class RecommendationWorkerTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory()

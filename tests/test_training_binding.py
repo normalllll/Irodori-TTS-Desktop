@@ -15,6 +15,7 @@ import torch
 
 from irodori_tts.config import ModelConfig, TrainConfig
 from irodori_tts.desktop import INITIALIZATION_RULES_VERSION
+from irodori_tts.desktop.base_models import InstalledBase, architecture_of_config
 from irodori_tts.desktop.materials import (
     edit_material,
     import_materials,
@@ -47,6 +48,36 @@ from irodori_tts.task_control import TaskCancelled, TaskChannel
 from tests.test_desktop_core import AdapterFixture
 
 REPO = Path(__file__).resolve().parents[1]
+# The shape the trainer's default model configuration has, as an installed base.
+BASE = InstalledBase(
+    id="v4.1-small",
+    name="Irodori-TTS v4.1 Small",
+    source="catalog",
+    repo="Aratako/Irodori-TTS-v4.1-Small",
+    revision="rev1",
+    checkpoint=Path("resolved-base"),
+    architecture=architecture_of_config(asdict(ModelConfig())),
+)
+
+
+def resources_of(*bases):
+    """resolve_resources' answer with these bases installed."""
+    return {
+        "codec": "codec",
+        "bases": {
+            base.id: {
+                "id": base.id,
+                "name": base.name,
+                "source": base.source,
+                "repo": base.repo,
+                "revision": base.revision,
+                "architecture": base.architecture,
+                "checkpoint": str(base.checkpoint),
+                "variants": {},
+            }
+            for base in bases
+        },
+    }
 
 
 class TrainingBindingTests(unittest.TestCase):
@@ -99,15 +130,9 @@ class TrainingBindingTests(unittest.TestCase):
         metadata.__enter__ = Mock(return_value=metadata)
         metadata.__exit__ = Mock(return_value=False)
         metadata.metadata.return_value = {"config_json": json.dumps(asdict(ModelConfig()))}
-        with (
-            patch(
-                "irodori_tts.desktop.resources.resolve_resources",
-                return_value={"model": "metadata-fixture"},
-            ),
-            patch("safetensors.safe_open", return_value=metadata),
-        ):
+        with patch("safetensors.safe_open", return_value=metadata):
             directory = create_run(
-                self.root, "snapshot", {"max_steps": 4} if values is None else values, REPO
+                self.root, "snapshot", {"max_steps": 4} if values is None else values, BASE
             )
         if resume:
             import train
@@ -155,7 +180,7 @@ class TrainingBindingTests(unittest.TestCase):
                 train_run(
                     {"project": str(self.root), "run": str(directory), "resume": resume},
                     TaskChannel(),
-                    {"model": "must-not-load"},
+                    resources_of(BASE),
                 )
             main.assert_not_called()
             gpu.assert_not_called()
@@ -206,8 +231,8 @@ class TrainingBindingTests(unittest.TestCase):
         self.assertEqual(run["status"], "stopped")
         self.assertEqual(read_json(directory / "config.json")["train"]["max_steps"], 10)
         self.assertEqual(run["config"]["train"]["save_every"], 3)
-        resume_eligibility(self.root, run)
-        self.assertIn("--resume", run_command(self.root, directory, {"model": "m"}, resume=True))
+        resume_eligibility(self.root, run, [BASE])
+        self.assertIn("--resume", run_command(self.root, directory, [BASE], resume=True))
 
     def test_material_edit_between_create_run_and_worker_lock_rejects_both_modes(self):
         runs = self.runs_before_mutation()
@@ -257,11 +282,85 @@ class TrainingBindingTests(unittest.TestCase):
     def test_unchanged_bindings_build_new_and_resume_commands(self):
         for resume, directory in self.runs_before_mutation():
             with self.subTest(resume=resume):
-                command = run_command(
-                    self.root, directory, {"model": "resolved-base"}, resume=resume
-                )
+                command = run_command(self.root, directory, [BASE], resume=resume)
                 self.assertEqual("--resume" in command, resume)
                 self.assertIn(str(self.root / "initialized/manifest.jsonl"), command)
+                init = command[command.index("--init-checkpoint") + 1]
+                self.assertEqual(init, str(BASE.checkpoint))
+
+    def test_a_run_records_the_base_it_was_created_on(self):
+        directory = self.make_run(False)
+        base = read_json(directory / "run.json")["base"]
+        self.assertEqual(
+            base,
+            {
+                "id": BASE.id,
+                "name": BASE.name,
+                "repo": BASE.repo,
+                "revision": BASE.revision,
+                "architecture": BASE.architecture,
+            },
+        )
+
+    def test_training_uses_the_runs_base_and_a_newer_commit_of_it(self):
+        directory = self.make_run(True)
+        other_shape = InstalledBase(
+            "imported-aaaaaaaaaaaa",
+            "Other",
+            "imported",
+            None,
+            None,
+            Path("other-base"),
+            {**BASE.architecture, "model_dim": 64},
+        )
+        newer = InstalledBase(**{**BASE.__dict__, "revision": "rev2", "checkpoint": Path("newer")})
+        for bases, expected in (([other_shape, BASE], "resolved-base"), ([newer], "newer")):
+            with self.subTest(expected=expected):
+                command = run_command(self.root, directory, bases, resume=True)
+                self.assertEqual(command[command.index("--init-checkpoint") + 1], expected)
+
+    def test_resume_and_training_fail_naming_a_base_that_is_not_installed(self):
+        from irodori_tts.desktop.training import resume_eligibility
+
+        directory = self.make_run(True)
+        run = read_json(directory / "run.json")
+        with self.assertRaises(BusinessError) as raised:
+            resume_eligibility(self.root, run, [])
+        self.assertEqual(raised.exception.message.key, "training.base_not_installed")
+        self.assertEqual(str(raised.exception.message.params["name"]), BASE.name)
+        with patch("train.main") as main:
+            with self.assertRaises(BusinessError):
+                train_run(
+                    {"project": str(self.root), "run": str(directory), "resume": True},
+                    TaskChannel(),
+                    resources_of(),
+                )
+            main.assert_not_called()
+        self.assertEqual(read_json(directory / "run.json")["status"], "failed")
+
+    def test_a_run_whose_model_settings_differ_from_its_base_is_rejected(self):
+        directory = self.make_run(False)
+        run = read_json(directory / "run.json")
+        run["base"]["architecture"] = {**run["base"]["architecture"], "model_dim": 1}
+        write_json(directory / "run.json", run)
+        with self.assertRaises(BusinessError) as raised:
+            run_command(self.root, directory, [BASE])
+        self.assertEqual(raised.exception.message.key, "training.base_does_not_match_run")
+
+    def test_a_legacy_run_base_resolves_by_repository(self):
+        from irodori_tts.desktop.base_models import SMALL_ARCHITECTURE
+
+        directory = self.make_run(False)
+        run = read_json(directory / "run.json")
+        # A run from before runs recorded their base's architecture, on the Small model.
+        run["base"] = {"repo": "Aratako/Irodori-TTS-v4.1-Small", "revision": "rev1"}
+        run["config"]["model"].update(SMALL_ARCHITECTURE)
+        write_json(directory / "run.json", run)
+        small = InstalledBase(
+            **{**BASE.__dict__, "architecture": dict(SMALL_ARCHITECTURE), "checkpoint": Path("s")}
+        )
+        command = run_command(self.root, directory, [BASE, small])
+        self.assertEqual(command[command.index("--init-checkpoint") + 1], "s")
 
 
 def tone(path, seconds, amplitude=0.3, rate=24000):

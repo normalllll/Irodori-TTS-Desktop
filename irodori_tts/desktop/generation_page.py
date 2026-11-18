@@ -32,13 +32,12 @@ from qfluentwidgets import (
 
 from irodori_tts.desktop.messages import BusinessError, fmt, t
 
-from . import model_files
+from . import base_models, model_files
 from .asr_dialog import human_size
 from .emoji_groups import emoji_name, grouped_emoji
-from .exports import export_audio_file
+from .exports import adapter_architecture, export_audio_file
 from .i18n import add_item, bind, clear_items, clear_text, set_text
 from .long_text import split_text
-from .resources import FAST_STEPS, MODEL_REVISION
 from .storage import digest, identity, read_json, stamp, write_json
 from .widgets import (
     DETAIL_MINIMUM,
@@ -272,6 +271,9 @@ class GenerationPage(Page):
         self.save_timer.setInterval(400)
         self.save_timer.timeout.connect(self.save_parameters)
         self.voice = combo_box()
+        # The base model the default voice speaks with; a trained voice uses its own base.
+        self.base = combo_box()
+        self.bases = []
         self.text = smooth(TextEdit())
         bind(self.text, t("generation_page.enter_japanese_text_here"), "setPlaceholderText")
         bind(self.text, t("generation_page.spoken_text_japanese"), "setAccessibleName")
@@ -305,6 +307,7 @@ class GenerationPage(Page):
         self.caption.textChanged.connect(self.input_changed)
         self.voice.currentIndexChanged.connect(self.input_changed)
         self.voice.currentIndexChanged.connect(lambda _index: self.voice_changed())
+        self.base.currentIndexChanged.connect(lambda _index: self.base_changed())
         self.caption.textChanged.connect(self.parameter_changed)
         self.trim.checkedChanged.connect(self.parameter_changed)
         for name in NUMBER_DEFAULTS:
@@ -436,6 +439,12 @@ class GenerationPage(Page):
         frame.setMaximumWidth(360)
 
         body.addWidget(field(t("app.voice"), self.voice))
+        self.base_field = field(t("generation_page.base_model"), self.base)
+        body.addWidget(self.base_field)
+        # The voice's base, a note on it, or why the chosen generation model is not used.
+        self.base_note = label("", "muted")
+        self.base_note.hide()
+        body.addWidget(self.base_note)
         body.addWidget(field(t("generation_page.voice_description"), self.caption))
 
         self.add_button = button(
@@ -721,6 +730,7 @@ class GenerationPage(Page):
         voice_id = self.voice.currentData()
         voice = self.voices.get(voice_id)
         fast = self.generation_model() == model_files.FAST
+        steps = self.fast_steps() if fast else self.steps.value()
         # 1 means off; it is then left out so the runtime skips the scaling entirely.
         strength = self.speaker_strength.value()
         return {
@@ -728,7 +738,7 @@ class GenerationPage(Page):
             "caption": self.caption.text().strip() or None,
             "ref_wavs": [item["path"] for item in self.references] or None,
             "no_ref": not self.references,
-            "num_steps": FAST_STEPS if fast else self.steps.value(),
+            "num_steps": steps,
             "num_candidates": self.num_candidates.value(),
             "seed": self.seed.value() if self.seed.value() >= 0 else None,
             "seconds": self.seconds.value() or None,
@@ -751,6 +761,9 @@ class GenerationPage(Page):
                     size=human_size(model_files.download_for(model_files.SPEECH).size),
                 )
             )
+        voice = self.voices.get(self.voice.currentData())
+        if voice and voice.get("base_id") is None:
+            raise BusinessError(voice["base_problem"])
         clear_text(self.error)
         request = self.request()
         self.host.tasks.start(
@@ -759,15 +772,16 @@ class GenerationPage(Page):
                 "request": request,
                 "voice": self.voice.currentText(),
                 "voice_id": self.voice.currentData(),
-                "base_revision": MODEL_REVISION,
+                "base": self.generation_base(),
                 "model": self.generation_model(),
                 "output": str(self.host.store.root / "generations" / stamp()),
             }
         )
 
     def refresh(self):
-        self.speech_ready = model_files.speech_ready()
+        self.speech_ready = model_files.speech_ready(self.host.resource_root)
         self.model_notice.setVisible(not self.speech_ready)
+        self.refresh_bases()
         self.generate_button.setEnabled(self.speech_ready and not self.host.tasks.busy)
         old = self.voice.currentData()
         self.voices = self.host.voice_entries()
@@ -968,18 +982,41 @@ class GenerationPage(Page):
             request = dict(item["request"])
             voice_id = item.get("voice_id") or self.voice_for_adapter(request.get("lora_adapter"))
             # The model may have moved with the data folder; use where it is now.
-            if voice_id in self.voices:
-                request["lora_adapter"] = self.voices[voice_id]["adapter"]
+            voice = self.voices.get(voice_id)
+            if voice:
+                request["lora_adapter"] = voice["adapter"]
+                if voice.get("base_id") is None:
+                    raise BusinessError(voice["base_problem"])
+                base = voice["base_id"]
+            elif request.get("lora_adapter"):
+                base = self.adapter_base(item, request["lora_adapter"])
+            else:
+                # The default voice again on the base the record used, when it is installed.
+                match = base_models.match_record(item.get("base"), self.bases)
+                base = match.base.id if match.base else self.generation_base()
             self.host.tasks.start(
                 {
                     "kind": "generate",
                     "request": request,
                     "voice": item["voice"],
                     "voice_id": voice_id,
-                    "base_revision": MODEL_REVISION,
+                    "base": base,
                     "output": str(self.host.store.root / "generations" / stamp()),
                 }
             )
+
+    def adapter_base(self, item, adapter):
+        """The installed base for a record's adapter that is no listed voice (an older record,
+        or a voice no longer registered): the base the record names, else the one its own
+        files describe. Never another architecture's: such an adapter does not load."""
+        match = base_models.match_record(item.get("base"), self.bases)
+        if match.base is None:
+            match = base_models.match_architecture(
+                adapter_architecture(Path(adapter), self.bases), self.bases
+            )
+        if match.base is None:
+            raise BusinessError(base_models.missing_message(match, item.get("base")))
+        return match.base.id
 
     def open_output(self):
         if self.output_audio:
@@ -1107,16 +1144,87 @@ class GenerationPage(Page):
         except (OSError, ValueError):
             return None
 
-    def generation_model(self):
-        """The model the settings choose, once downloaded; None is the speech model. Trained
-        voices use it too: a LoRA trained on the speech model loads on the fast one."""
+    def refresh_bases(self):
+        """The base choice of the default voice: shown when there is a choice to make."""
+        self.bases = self.host.bases()
+        old = self.base.currentData() or self.host.store.settings.get("generation_base")
+        self.base.blockSignals(True)
+        clear_items(self.base)
+        for base in self.bases:
+            add_item(self.base, base.name, userData=base.id)
+        self.base.setCurrentIndex(max(0, self.base.findData(old)))
+        self.base.blockSignals(False)
+        self.show_generation_model()
+
+    def base_changed(self):
+        self.host.store.settings["generation_base"] = self.base.currentData()
+        self.host.store.save()
+        self.show_generation_model()
+
+    def installed_base(self, base_id):
+        return next((base for base in self.bases if base.id == base_id), None)
+
+    def generation_base(self):
+        """The id of the base the chosen voice speaks with, None when it is not installed. A
+        trained voice runs on the base it matches; the default voice on the chosen base."""
+        voice = self.voices.get(self.voice.currentData())
+        if voice:
+            return voice.get("base_id")
+        chosen = self.installed_base(self.base.currentData())
+        chosen = chosen or (self.bases[0] if self.bases else None)
+        return chosen.id if chosen else None
+
+    def wanted_model(self):
         key = self.host.store.settings.get("generation_model")
-        if key not in model_files.GENERATION_MODELS:
-            return None
-        return key if model_files.download_for(key).installed() else None
+        return key if key in model_files.GENERATION_MODELS else None
+
+    def generation_model(self):
+        """The variant the settings choose, when the voice's base has it installed; None is
+        the base's standard checkpoint. Trained voices use it too: a LoRA trained on a base
+        loads on that base's variants."""
+        key = self.wanted_model()
+        base = self.installed_base(self.generation_base())
+        return key if key and base and key in base.variants else None
+
+    def fast_steps(self):
+        base = self.installed_base(self.generation_base())
+        entry = base.catalog if base else None
+        variant = entry.variant(model_files.FAST) if entry else None
+        return variant.steps if variant and variant.steps else self.steps.value()
+
+    def show_base(self):
+        """The default voice's base choice, or the trained voice's base and remarks on it."""
+        voice = self.voices.get(self.voice.currentData())
+        self.base_field.setVisible(voice is None and len(self.bases) > 1)
+        lines = []
+        if voice:
+            if voice.get("base_id") is None:
+                lines.append(voice["base_problem"])
+            else:
+                lines.append(t("generation_page.voice_base", name=fmt(voice["base_name"], "", -1)))
+                if voice.get("base_note"):
+                    lines.append(voice["base_note"])
+        base = self.installed_base(self.generation_base())
+        key = self.wanted_model()
+        if base and key and key not in base.variants:
+            lines.append(
+                t(
+                    "generation_page.variant_not_installed",
+                    name=fmt(base.name, "", -1),
+                    model=t("settings_page.model_low_vram")
+                    if key == model_files.LOW_VRAM
+                    else t("settings_page.model_fast"),
+                )
+            )
+        text = lines[0] if lines else ""
+        for line in lines[1:]:
+            text = t("common.lines", p0=text, p1=line)
+        set_text(self.base_note, text)
+        self.base_note.setVisible(bool(lines))
 
     def show_generation_model(self):
         """The fast model has its own steps and guidance; their fields rest while it is used."""
+        self.show_base()
         fast = self.generation_model() == model_files.FAST
         for widget in (
             self.steps,

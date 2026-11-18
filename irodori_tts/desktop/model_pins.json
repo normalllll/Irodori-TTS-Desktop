@@ -1,57 +1,6 @@
 {
  "format_version": 1,
  "repos": {
-  "Aratako/Irodori-TTS-v4.1-Small": {
-   "files": {
-    "model.safetensors": {
-     "sha256": "c85de88c01700cb53538e706f128ebcb1b8513ad21d7d0e75f58bc82cdbf89f6",
-     "size": 3064295596
-    },
-    "tokenizer/tokenizer.json": {
-     "sha256": "6a0734cf21c802169defaffe719bc2ef12bb9d0be37e54b61ed27aa89394723d",
-     "size": 6718495
-    },
-    "tokenizer/tokenizer_config.json": {
-     "sha256": "d229a271c64de1a7939d20d3665498e873fa91d5ee2edf135d73ec752cb9c9d3",
-     "size": 668
-    }
-   },
-   "revision": "2b28324dc263ed5e6638b3cf3dd94c82ead07b4b"
-  },
-  "Aratako/Irodori-TTS-v4.1-Small-MF": {
-   "files": {
-    "model.safetensors": {
-     "sha256": "a3f204b3ee06058f4e639a1af38408e7e3af5b6c75176897ecb8bfaaebb4fd54",
-     "size": 3093131788
-    },
-    "tokenizer/tokenizer.json": {
-     "sha256": "6a0734cf21c802169defaffe719bc2ef12bb9d0be37e54b61ed27aa89394723d",
-     "size": 6718495
-    },
-    "tokenizer/tokenizer_config.json": {
-     "sha256": "d229a271c64de1a7939d20d3665498e873fa91d5ee2edf135d73ec752cb9c9d3",
-     "size": 668
-    }
-   },
-   "revision": "ccc78f5d480b6e51b69b2d5042a14c4da04fea6e"
-  },
-  "Aratako/Irodori-TTS-v4.1-Small-Quantized": {
-   "files": {
-    "int8-weight-only/model.safetensors": {
-     "sha256": "1fb6394b52c11329fd19d6c6f388a1e224721752a32aad906cae8653f5b25dcc",
-     "size": 914316834
-    },
-    "tokenizer/tokenizer.json": {
-     "sha256": "6a0734cf21c802169defaffe719bc2ef12bb9d0be37e54b61ed27aa89394723d",
-     "size": 6718495
-    },
-    "tokenizer/tokenizer_config.json": {
-     "sha256": "d229a271c64de1a7939d20d3665498e873fa91d5ee2edf135d73ec752cb9c9d3",
-     "size": 668
-    }
-   },
-   "revision": "ef04e6c3ba56138ae23e86a2eabc004f76990e37"
-  },
   "Aratako/Semantic-DACVAE-Japanese-32dim": {
    "files": {
     "weights.pth": {

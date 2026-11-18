@@ -16,12 +16,13 @@ from irodori_tts.desktop.messages import BusinessError, error_message, fmt, t
 from irodori_tts.task_control import TaskCancelled, TaskChannel, check_cancel
 from irodori_tts.upstream import runtime_sources
 
-from . import INITIALIZATION_RULES_VERSION, asr, model_files
+from . import INITIALIZATION_RULES_VERSION, asr, base_models, model_files
 from .long_text import split_text
 from .materials import clean_field, materials_fingerprint, validate_materials
 from .resources import (
     CODEC_REVISION,
     adopt_cached_resources,
+    cached_snapshot,
     configure_environment,
     hide_child_consoles,
     resolve_resources,
@@ -221,7 +222,12 @@ def train_run(payload: dict, channel: TaskChannel, resources: dict) -> dict:
             project = load_project(root)
             reconcile_sources(root, project)
             # This gate runs under the project lock for new and resumed runs.
-            command = run_command(root, run_root, resources, resume=payload.get("resume", False))
+            command = run_command(
+                root,
+                run_root,
+                base_models.bases_of(resources),
+                resume=payload.get("resume", False),
+            )
         except Exception as exc:
             run.update(status="failed", error=error_message(exc))
             write_json(run_root / "run.json", run)
@@ -293,22 +299,14 @@ def install_addons(payload: dict, channel: TaskChannel) -> dict:
     return {"status": "completed", "installed": list(payload["keys"])}
 
 
-def generation_model_download(key):
-    """A generation model (low video memory or fast), in the shape of a backend for the shared
-    download loop."""
+def download_asr_models(payload: dict, channel: TaskChannel) -> dict:
+    """Transcription models, and the generation variants of installed catalog bases."""
     from types import SimpleNamespace
 
-    item = model_files.download_for(key)
-    return SimpleNamespace(key=item.key, title=item.title, size=item.size, models=item.models)
-
-
-def download_asr_models(payload: dict, channel: TaskChannel) -> dict:
-    backends = [
-        generation_model_download(key)
-        if key in model_files.GENERATION_MODELS
-        else asr.backend_for(key)
-        for key in payload["backends"]
-    ]
+    root = Path(payload["resource_root"])
+    keys = list(payload["backends"])
+    variants = [model_files.download_for(key, root) for key in keys if key.startswith("variant:")]
+    backends = [asr.backend_for(key) for key in keys if not key.startswith("variant:")]
     due = progress_pacer()
 
     def report(backend, done, total):
@@ -327,8 +325,21 @@ def download_asr_models(payload: dict, channel: TaskChannel) -> dict:
                 ),
             )
 
+    for item in variants:
+        done = 0
+        line = SimpleNamespace(key=item.key, title=item.title)
+        report(line, 0, item.size)
+
+        def moved(amount, item=item, line=line):
+            nonlocal done
+            done += amount
+            report(line, min(done, item.size), item.size)
+
+        base_models.download_variant(
+            root, item.base, item.variant, cancel=channel.stopped, progress=moved
+        )
     asr.download_models(backends, cancel=channel.stopped, progress=report)
-    return {"status": "completed", "backends": list(payload["backends"])}
+    return {"status": "completed", "backends": keys}
 
 
 SEGMENT_PAUSE = 0.3
@@ -418,6 +429,24 @@ def synthesize_segments(
     )
 
 
+def check_adapter_fits(adapter: Path, checkpoint: Path, base: dict) -> None:
+    """Refuse an adapter trained on another architecture than the checkpoint's before any
+    model loads; it would only fail on mismatched tensor shapes. Nothing is refused when
+    either side does not tell its architecture."""
+    from .exports import adapter_architecture
+
+    expected = base_models.read_architecture(checkpoint)
+    found = adapter_architecture(adapter)
+    if expected and found and found != expected:
+        raise BusinessError(
+            t(
+                "worker.adapter_for_another_base",
+                base=fmt(base.get("name") or base.get("id"), "", -1),
+                adapter=fmt(base_models.describe({"architecture": found}), "", -1),
+            )
+        )
+
+
 def synthesize(payload: dict, channel: TaskChannel, resources: dict, runtime):
     from irodori_tts.inference_runtime import (
         InferenceRuntime,
@@ -435,12 +464,17 @@ def synthesize(payload: dict, channel: TaskChannel, resources: dict, runtime):
         if not complete_checkpoint(checkpoint):
             raise BusinessError(t("training_page.select_a_complete_checkpoint"))
 
+    base = (resources.get("bases") or {}).get(payload.get("base"))
+    if base is None:
+        raise BusinessError(t("base_models.generation_base_missing"))
+    # A variant of the chosen base when it is installed; a voice never runs on another base's.
     model = payload.get("model")
-    checkpoint = (
-        model_files.generation_checkpoint(model)
-        if model in model_files.GENERATION_MODELS
-        else resources["model"]
-    )
+    checkpoint = base["variants"].get(model) if model in model_files.GENERATION_MODELS else None
+    if checkpoint is None:
+        model, checkpoint = None, base["checkpoint"]
+    adapter = payload.get("checkpoint_snapshot") or payload["request"].get("lora_adapter")
+    if adapter:
+        check_adapter_fits(Path(adapter), Path(checkpoint), base)
     if runtime is not None and runtime.key.checkpoint != checkpoint:
         runtime.unload()
         runtime = None
@@ -511,7 +545,7 @@ def synthesize(payload: dict, channel: TaskChannel, resources: dict, runtime):
         "duration": result.audio.shape[-1] / result.sample_rate,
         "seed": result.used_seed,
         "timings": result.stage_timings,
-        "base_revision": payload.get("base_revision"),
+        "base": {key: base[key] for key in ("id", "name", "repo", "revision", "architecture")},
         "model": model,
     }
     if len(segments) > 1:
@@ -575,10 +609,9 @@ def copy_progress(channel, message):
     return report
 
 
-def speech_progress(channel):
-    """received(n) for the speech model's download: progress over what is still missing."""
-    item = model_files.download_for(model_files.SPEECH)
-    total = max(1, item.missing_size())
+def download_progress(channel, item, total):
+    """received(n) for one download line: progress over total bytes."""
+    total = max(1, total)
     done = 0
     due = progress_pacer()
 
@@ -591,7 +624,7 @@ def speech_progress(channel):
             "progress",
             step=round(done / 1000**2),
             total=round(total / 1000**2),
-            item=model_files.SPEECH,
+            item=item.key,
             message=t(
                 "asr.downloading",
                 name=fmt(item.title, "", -1),
@@ -603,17 +636,56 @@ def speech_progress(channel):
     return received
 
 
+def download_bases(payload: dict, channel: TaskChannel) -> bool:
+    """The catalog bases a resources task asks for; with none named and none installed, the
+    default base. With update, an installed base moves to its repository's latest commit.
+    Whether any was asked for."""
+    root = Path(payload["resource_root"])
+    wanted = payload.get("bases")
+    if wanted is None:
+        wanted = [] if base_models.load_registry(root) else [base_models.default_catalog_base().id]
+    for base_id in wanted:
+        if not payload.get("update") and base_models.installed_base(root, base_id) is not None:
+            continue
+        item = model_files.download_for(model_files.base_key(base_id), root)
+        channel.emit(
+            "stage",
+            message=t(
+                "asr.downloading",
+                name=fmt(item.title, "", -1),
+                done=fmt(0.0, ".2f"),
+                total=fmt(item.base_size / 1000**3, ".2f"),
+            ),
+            item=item.key,
+        )
+        base_models.download_catalog_base(
+            root,
+            base_id,
+            update=payload.get("update", False),
+            cancel=channel.stopped,
+            progress=download_progress(channel, item, item.base_size),
+        )
+    return bool(wanted)
+
+
+def shared_progress(channel):
+    """received(n) for the pinned resources every base needs, shown on the speech line."""
+    item = model_files.download_for(model_files.SPEECH)
+    missing = sum(model.size for model in item.models if cached_snapshot(model) is None)
+    return download_progress(channel, item, missing)
+
+
 def import_models(payload: dict, channel: TaskChannel) -> dict:
     result = model_files.import_model_files(
         Path(payload["source"]),
+        Path(payload["resource_root"]),
         cancel=channel.stopped,
         progress=copy_progress(
             channel, lambda done, total: t("models.importing", done=done, total=total)
         ),
     )
-    if model_files.SPEECH in result["complete"]:
-        # The speech resources are read from their manifest; record what the cache now has.
-        adopt_cached_resources(Path(payload["resource_root"]))
+    # The speech resources are read from their manifest; record what the cache now has.
+    adopt_cached_resources(Path(payload["resource_root"]))
     return {"status": "completed", **result}
 
 
@@ -621,12 +693,32 @@ def export_models(payload: dict, channel: TaskChannel) -> dict:
     result = model_files.export_model_files(
         list(payload["keys"]),
         Path(payload["destination"]),
+        Path(payload["resource_root"]),
         cancel=channel.stopped,
         progress=copy_progress(
             channel, lambda done, total: t("models.exporting", done=done, total=total)
         ),
     )
     return {"status": "completed", **result}
+
+
+def task_bases(payload: dict) -> list[str] | None:
+    """The bases a task checks and uses: the resources task all of them; a generation or a
+    sample its own; training the run's; preprocessing none (it needs only the codec)."""
+    kind = payload["kind"]
+    if kind == "resources":
+        return None
+    if kind == "train":
+        try:
+            run = read_json(Path(payload["run"]) / "run.json", {}) or {}
+            bases = base_models.load_registry(Path(payload["resource_root"]))
+        except (OSError, ValueError):
+            return []
+        match = base_models.match_record(run.get("base"), bases)
+        return [match.base.id] if match.base else []
+    if kind in {"generate", "preview"}:
+        return [payload["base"]] if payload.get("base") else []
+    return []
 
 
 def execute(payload: dict, runtime=None):
@@ -646,11 +738,15 @@ def execute(payload: dict, runtime=None):
                 cancel=channel.stopped,
                 repair=payload.get("repair", False),
                 progress=lambda message: channel.emit("stage", message=message, item="speech"),
-                received=speech_progress(channel) if download else None,
+                received=shared_progress(channel) if download else None,
+                bases=task_bases(payload),
             )
             if speech
             else {}
         )
+        # The shared files first, so that a base download is not wasted on a missing codec.
+        if download and not payload.get("repair") and download_bases(payload, channel):
+            resources = resolve_resources(Path(payload["resource_root"]), cancel=channel.stopped)
         check_cancel(channel.stopped)
         if payload["kind"] not in FILE_TASKS | {"resources"}:
             import torch

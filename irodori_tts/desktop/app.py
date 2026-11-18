@@ -34,15 +34,13 @@ from shiboken6 import isValid
 
 from irodori_tts.desktop.messages import LANGUAGES, BusinessError, error_message, fmt, t
 
-from . import model_files
+from . import base_models, model_files
 from .exports import cuda_of, device_report, import_project
 from .generation_page import GenerationPage
 from .guide_page import GuidePage
 from .i18n import bind, clear_text, locale_manager, set_text, system_language
 from .library_page import ModelsPage
 from .resources import (
-    MODEL_REPO,
-    MODEL_REVISION,
     adopt_cached_resources,
     cache_root,
     configure_environment,
@@ -278,12 +276,20 @@ class MainWindow(FluentWindow):
         self.timer.setInterval(2000)
         self.timer.timeout.connect(self.save_ui)
         self.timer.start()
+        # Bases the download cache already holds count from the first frame, so a new data
+        # folder does not open on a download it does not need. Registering them reads file
+        # sizes and checkpoint headers only; the shared files are adopted after the window.
+        if not self.bases():
+            try:
+                base_models.adopt_cached_bases(self.resource_root)
+            except OSError:
+                pass
         self.refresh()
         ui = store.settings.get("ui", {})
         generation = ui.get("generation", {})
         self.generation.restore(generation if isinstance(generation, dict) else {})
         page = ui.get("page", 1)
-        if model_files.speech_ready():
+        if model_files.speech_ready(self.resource_root):
             self.navigate(page if isinstance(page, int) else 1)
         else:
             # Nothing works without the speech model: open where it is obtained, directly
@@ -474,11 +480,20 @@ class MainWindow(FluentWindow):
         self.file_work_text.setVisible(working)
         self.file_work_bar.setVisible(working)
 
+    @property
+    def resource_root(self) -> Path:
+        """The data folder's resources: the manifest and the base model registry."""
+        return self.store.root / "resources"
+
+    def bases(self) -> list:
+        """The installed base models, catalog ones first."""
+        return base_models.load_registry(self.resource_root)
+
     def adopt_resources(self):
         """A new data folder whose resources the shared cache already holds starts ready."""
         if not isValid(self) or self.settings_page.resources_ready or self.tasks.busy:
             return
-        root = self.store.root / "resources"
+        root = self.resource_root
         self.run_io(
             lambda: adopt_cached_resources(root),
             lambda adopted: self.refresh() if adopted else None,
@@ -638,19 +653,22 @@ class MainWindow(FluentWindow):
 
     def voice_entries(self):
         """Every model Generate can speak with: each training run with a complete checkpoint
-        (its latest), then the imported models."""
-        return {**self.run_models(), **self.imported_models()}
+        (its latest), then the imported models. Each names the installed base it runs on
+        ("base_id", None when none has its architecture) and why not ("base_problem")."""
+        bases = self.bases()
+        entries = {**self.run_models(), **self.imported_models()}
+        for entry in entries.values():
+            entry.update(base_models.voice_base(entry.get("base"), bases))
+        return entries
 
     def run_models(self):
         result = {}
         for root, project, run_root, run in self.store.runs():
-            if run.get("checkpoint") and run.get("base") == {
-                "repo": MODEL_REPO,
-                "revision": MODEL_REVISION,
-            }:
+            if run.get("checkpoint"):
                 adapter = root / run["checkpoint"]
                 if complete_checkpoint(adapter):
                     result[run["id"]] = {
+                        "base": run.get("base"),
                         "name": run["name"],
                         "adapter": str(adapter),
                         "project_name": project["name"],
@@ -714,6 +732,9 @@ class MainWindow(FluentWindow):
 
     def preview(self, root, run_root, checkpoint=None):
         run = read_json(run_root / "run.json")
+        base = base_models.voice_base(run.get("base"), self.bases())
+        if base["base_id"] is None:
+            raise BusinessError(base["base_problem"])
         if checkpoint is None:
             if not run.get("checkpoint"):
                 raise BusinessError(t("training_page.select_a_complete_checkpoint"))
@@ -734,6 +755,7 @@ class MainWindow(FluentWindow):
                 "run": str(run_root),
                 "voice": run["name"],
                 "voice_id": run["id"],
+                "base": base["base_id"],
                 "output": str(run_root / "samples" / stamp()),
                 "request": request,
             }
@@ -743,11 +765,15 @@ class MainWindow(FluentWindow):
         """A new sample for a model without a training run, kept in the model's own folder."""
         if self.tasks.busy:
             raise BusinessError(t("library_page.sample_waits_for_the_current_task"))
+        base = base_models.voice_base(voice.get("base"), self.bases())
+        if base["base_id"] is None:
+            raise BusinessError(base["base_problem"])
         self.tasks.start(
             {
                 "kind": "generate",
                 "voice": voice["name"],
                 "voice_id": voice["id"],
+                "base": base["base_id"],
                 "output": str(Path(voice["adapter"]) / "samples" / stamp()),
                 "request": {
                     "text": "こんにちは。今日はとてもいい天気ですね。",
@@ -1057,9 +1083,10 @@ class MainWindow(FluentWindow):
                 position=InfoBadgePosition.NAVIGATION_ITEM,
             )
             self.guide_badge.setFixedSize(8, 8)
-        elif not wanted and self.guide_badge is not None:
-            self.guide_badge.deleteLater()
-            self.guide_badge = None
+        # Hidden, never deleted: the badge's manager keeps moving it whenever the navigation
+        # item resizes (as it does when the navigation collapses), and would reach a deleted one.
+        if self.guide_badge is not None:
+            self.guide_badge.setVisible(wanted)
 
     def detect_device(self, error=None):
         """Look at the GPU and system in the background; the result is cached for the tiles,

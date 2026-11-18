@@ -14,6 +14,7 @@ from PySide6.QtCore import QCoreApplication, QEvent, QProcess
 from PySide6.QtWidgets import QApplication
 
 from irodori_tts.desktop.app import MainWindow
+from irodori_tts.desktop.base_models import base_record
 from irodori_tts.desktop.messages import BusinessError
 from irodori_tts.desktop.storage import (
     AppStore,
@@ -26,6 +27,7 @@ from irodori_tts.desktop.storage import (
 from irodori_tts.desktop.tasks import TaskManager, TaskState, TrainingPreviewPhase
 from irodori_tts.desktop.training import RECOMMENDED
 from irodori_tts.desktop.worker import copy_progress
+from tests.base_fixtures import install_base
 from tests.qt_cleanup import cleanup_qt, stub_connection_check
 
 REPO = Path(__file__).resolve().parents[1]
@@ -429,8 +431,11 @@ class TrainingPreviewTests(unittest.TestCase):
             "registered": False,
             "initialization_id": "init",
         }
-        write_json(run_root / "run.json", run)
         store = AppStore(self.root / "ui_data")
+        # A sample speaks on the run's base, which must be installed.
+        base = install_base(store.root / "resources")
+        run["base"] = base_record(base)
+        write_json(run_root / "run.json", run)
         store.register(project)
         with patch.object(MainWindow, "detect_device", lambda self, error=None: None):
             window = MainWindow(store)

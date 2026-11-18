@@ -8,6 +8,7 @@ from dataclasses import asdict, dataclass
 
 from irodori_tts.task_control import check_cancel
 
+from .base_models import catalog_base, default_catalog_base, normalize_record
 from .materials import materials_fingerprint, needs_review
 from .messages import BusinessError, t
 from .storage import load_project
@@ -21,13 +22,28 @@ class PlanningPolicy:
     exposures: int = 100
     effective_batch: int = 8
     usable_memory_fraction: float = 0.75
-    # Deliberately rounded-up estimates for the shipped Small model's LoRA training.
-    # These are a conservative envelope, not an exact peak prediction or card tiers.
-    fixed_memory_gib: float = 4.0
-    activation_gib_per_recording: float = 1.0
 
 
 POLICY = PlanningPolicy()
+
+
+def base_memory(base) -> tuple[float, float]:
+    """(fixed GiB, GiB per recording) of LoRA training on a base: the catalog's deliberately
+    rounded-up envelope, not an exact peak prediction. A base outside the catalog scales the
+    default base's envelope by its size (model width times depth)."""
+    record = normalize_record(base) or {}
+    entry = catalog_base(record.get("id"))
+    if entry is not None and entry.architecture == record.get("architecture"):
+        return entry.training_memory
+    reference = default_catalog_base()
+    architecture = record.get("architecture")
+    if not architecture:
+        return reference.training_memory
+    scale = (architecture["model_dim"] * architecture["num_layers"]) / (
+        reference.architecture["model_dim"] * reference.architecture["num_layers"]
+    )
+    fixed, per_recording = reference.training_memory
+    return fixed * scale, per_recording * scale
 
 
 @dataclass(frozen=True)
@@ -56,8 +72,10 @@ def material_profile(rows: list[dict]) -> MaterialProfile:
     )
 
 
-def plan_training(project: dict, settings: dict, gpu: dict | None) -> dict:
+def plan_training(project: dict, settings: dict, gpu: dict | None, base=None) -> dict:
+    """A plan for a run on base (a base record; None is the default base)."""
     options = {**RECOMMENDED, **settings}
+    fixed_gib, activation_gib = base_memory(base)
     rows = [item for item in project["materials"] if item["included"]]
     summary = material_profile(rows)
     count = training_count(summary.count, bool(options["valid_every"]), options["valid_ratio"])
@@ -73,8 +91,8 @@ def plan_training(project: dict, settings: dict, gpu: dict | None) -> dict:
     target_seconds = min(summary.maximum_seconds, options["max_latent_steps"] / 25)
     baseline_seconds = RECOMMENDED["max_latent_steps"] / 25 + RECOMMENDED["ref_max_seconds"]
     length_scale = (target_seconds + options["ref_max_seconds"]) / baseline_seconds
-    activation = POLICY.activation_gib_per_recording * max(length_scale, length_scale**2)
-    fixed = POLICY.fixed_memory_gib * precision_scale
+    activation = activation_gib * max(length_scale, length_scale**2)
+    fixed = fixed_gib * precision_scale
     activation *= precision_scale
     standard = (
         options["lora_enabled"]
@@ -109,6 +127,10 @@ def plan_training(project: dict, settings: dict, gpu: dict | None) -> dict:
         "gpu": gpu["name"] if gpu else t("training.recommendation_unknown_device"),
         "memory_budget_bytes": int(budget * 1024**3) if budget is not None else None,
         "policy": asdict(POLICY),
+        "base_memory_gib": [fixed_gib, activation_gib],
+        # Batch one with checkpointing needs about the fixed part; with less free memory than
+        # that, training will likely run out of memory, which the page says up front.
+        "memory_short": free_gib is not None and free_gib < fixed,
     }
 
 
@@ -122,4 +144,4 @@ def recommend_training(payload: dict, channel) -> dict:
     # A bounded read-only driver query. No encoding, model files, torch import or GPU work.
     gpu = device_report(timeout=1)["gpu"]
     check_cancel(channel.stopped)
-    return plan_training(project, payload["settings"], gpu)
+    return plan_training(project, payload["settings"], gpu, payload.get("base"))

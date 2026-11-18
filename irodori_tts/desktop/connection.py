@@ -10,7 +10,7 @@ import time
 
 from irodori_tts.desktop.messages import t
 
-from .resources import MODEL_REPO, MODEL_REVISION
+from .base_models import default_catalog_base
 
 STATUS_URL = "https://status.huggingface.co/index.json"
 TIMEOUT = 5.0
@@ -41,8 +41,8 @@ def hub_status(client) -> str | None:
 
 
 def check_hugging_face() -> dict:
-    """{"reachable", "latency_ms", "reason", "status"}: one metadata request for the pinned
-    speech model, and the official status when that page answers. Never raises: the page
+    """{"reachable", "latency_ms", "reason", "status"}: one metadata request for the default
+    base model, and the official status when that page answers. Never raises: the page
     waits for this answer, and a failure without one left it checking for good."""
     try:
         return _check_hugging_face()
@@ -57,7 +57,7 @@ def _check_hugging_face() -> dict:
         start = time.monotonic()
         try:
             response = client.get(
-                f"https://huggingface.co/api/models/{MODEL_REPO}/revision/{MODEL_REVISION}"
+                f"https://huggingface.co/api/models/{default_catalog_base().repo}"
             )
             latency = round((time.monotonic() - start) * 1000)
             if response.status_code != 200:

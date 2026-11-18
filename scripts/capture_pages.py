@@ -35,6 +35,7 @@ NAMES = {
     "run": "my-lora",
     "imported": "studio-female",
     "clip": "sample_{:02d}.wav",
+    "base": "my-base",
 }
 LONG_NAMES = {
     "project": "Hana 学校の放課後ボイス 2026 夏 完全版 (whisper 校対済み)",
@@ -42,12 +43,52 @@ LONG_NAMES = {
     "run": "hana-summer-full-v3-lr1e4-rank32-final-really-final",
     "imported": "imported-studio-female-voice-from-another-computer-2026-10",
     "clip": "hana_after_school_line_{:02d}_take3_denoised_48k.wav",
+    "base": "Irodori-TTS v4 Large community fine-tune for expressive narration (2026-11)",
 }
 
 
-def seed_training(root, names):
+def seed_bases(data, names):
+    """Register the default catalog base and an imported base, as header-only checkpoints:
+    the pages read a base's architecture from its header and never its weights. Returns
+    their base records."""
+    import json
+    import struct
+
+    from irodori_tts.desktop.base_models import (
+        LARGE_ARCHITECTURE,
+        InstalledBase,
+        base_record,
+        default_catalog_base,
+        save_base,
+    )
+
+    root = data / "resources"
+    small = default_catalog_base()
+    records = []
+    for base_id, name, source, architecture in (
+        (small.id, small.name, "catalog", small.architecture),
+        ("imported-0123456789ab", names["base"], "imported", LARGE_ARCHITECTURE),
+    ):
+        checkpoint = root / "bases" / base_id / "model.safetensors"
+        checkpoint.parent.mkdir(parents=True, exist_ok=True)
+        header = json.dumps({"__metadata__": {"config_json": json.dumps(architecture)}}).encode()
+        checkpoint.write_bytes(struct.pack("<Q", len(header)) + header)
+        base = InstalledBase(
+            id=base_id,
+            name=name,
+            source=source,
+            repo=small.repo if source == "catalog" else None,
+            revision="0" * 40 if source == "catalog" else None,
+            checkpoint=checkpoint,
+            architecture=dict(architecture),
+        )
+        save_base(root, base)
+        records.append(base_record(base))
+    return records
+
+
+def seed_training(root, names, base):
     """Mark the project preprocessed and add a finished and an interrupted run with checkpoints."""
-    from irodori_tts.desktop.resources import MODEL_REPO, MODEL_REVISION
     from irodori_tts.desktop.storage import identity, load_project, now, save_project, write_json
 
     project = load_project(root)
@@ -90,7 +131,7 @@ def seed_training(root, names):
                 "step": step,
                 "checkpoint": f"runs/{run_id}/checkpoints/checkpoint_{saved[-1]:07d}",
                 "registered": status == "completed",
-                "base": {"repo": MODEL_REPO, "revision": MODEL_REVISION},
+                "base": base,
                 "config": {"train": {"max_steps": 1000, "save_every": 250, "learning_rate": 1e-4}},
             },
         )
@@ -336,7 +377,8 @@ def main():
     examples = REPO / "examples/desktop"
     import_materials(root, examples, examples / "transcripts.csv")
     seed_transcripts(data, root, names)
-    seed_training(root, names)
+    bases = seed_bases(data, names)
+    seed_training(root, names, bases[1])
     seed_tasks(data, root, names)
     store.register(seed_failed(data, names))
     store.register(root)
@@ -367,7 +409,18 @@ def main():
     imported.mkdir(parents=True)
     write_json(
         imported / "voice.json",
-        {"name": names["imported"], "step": 2000, "created": now(), "registered": True},
+        {
+            "name": names["imported"],
+            "step": 2000,
+            "created": now(),
+            "registered": True,
+            # Trained on a base no one here has installed: the page names what it needs.
+            "base": {
+                **bases[1],
+                "id": "imported-ffffffffffff",
+                "architecture": {**bases[1]["architecture"], "num_layers": 30},
+            },
+        },
     )
 
     window = MainWindow(store)
@@ -379,6 +432,8 @@ def main():
     window.training.materials.setCurrentIndex(window.training.materials.model().index(0, 0))
     window.training.runs.setCurrentIndex(window.training.runs.model().index(0, 0))
 
+    # Without the update check of the installed bases, which would reach the network.
+    window.settings_page.latest_checked = True
     window.settings_page.scan_storage()
     window.settings_page.diagnose()
     QThreadPool.globalInstance().waitForDone(30000)

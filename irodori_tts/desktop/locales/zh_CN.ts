@@ -316,10 +316,6 @@
       <translation>项目包格式不受支持</translation>
     </message>
     <message>
-      <source>exports.this_voice_uses_a_different_base_model</source>
-      <translation>该模型基于不同版本的基础模型</translation>
-    </message>
-    <message>
       <source>exports.partial_downloads</source>
       <translation>未完成的下载</translation>
     </message>
@@ -2016,10 +2012,6 @@ Codec：Semantic DACVAE Japanese 32dim
       <translation>改动自动保存</translation>
     </message>
     <message>
-      <source>settings_page.model_name</source>
-      <translation>Irodori TTS v4.1 Small</translation>
-    </message>
-    <message>
       <source>settings_page.codec_name</source>
       <translation>DACVAE Japanese 32dim</translation>
     </message>
@@ -2601,10 +2593,6 @@ Codec：Semantic DACVAE Japanese 32dim
       <translation>下载转写模型</translation>
     </message>
     <message>
-      <source>models.speech_title</source>
-      <translation>基础模型（Irodori TTS、编解码器、水印）</translation>
-    </message>
-    <message>
       <source>models.speech_reason</source>
       <translation>必须：没有它无法生成语音，也无法训练。</translation>
     </message>
@@ -2800,7 +2788,7 @@ Codec：Semantic DACVAE Japanese 32dim
     </message>
     <message>
       <source>guide.import_hint</source>
-      <translation>无论下载还是导入，每个文件都会按固定版本校验。下载中断后，再次开始会从中断处继续。</translation>
+      <translation>基础模型下载最新版本，并按其校验值检查完整性；其他模型按固定版本校验。下载中断后，再次开始会从中断处继续。</translation>
     </message>
     <message>
       <source>guide.ready</source>
@@ -3342,6 +3330,11 @@ Codec：Semantic DACVAE Japanese 32dim
 素材检查：{duplicates} 条重复文本，{review} 条转写待核对。</translation>
     </message>
     <message>
+      <source>training_page.recommendation_memory_short</source>
+      <translation>
+这个基础模型即使在批大小 1、开启检查点时也需要约 {need} GB 空闲显存；不足时训练很可能显存不足。请关闭其他占用显卡的程序，或改用较小的基础模型训练。</translation>
+    </message>
+    <message>
       <source>training_page.recommendation_running</source>
       <translation>正在读取素材统计和显卡信息，完成后一次性填入推荐参数…</translation>
     </message>
@@ -3378,19 +3371,19 @@ Codec：Semantic DACVAE Japanese 32dim
     </message>
     <message>
       <source>models.low_vram_title</source>
-      <translation>低显存模型</translation>
+      <translation>{name}：低显存</translation>
     </message>
     <message>
       <source>models.low_vram_reason</source>
-      <translation>生成时少用约四分之一显存；训练仍使用语音模型。</translation>
+      <translation>生成时少用约四分之一显存；训练仍使用基础模型。</translation>
     </message>
     <message>
       <source>models.fast_title</source>
-      <translation>快速模型</translation>
+      <translation>{name}：快速</translation>
     </message>
     <message>
       <source>models.fast_reason</source>
-      <translation>采样步数从 40 步降到 4 步，生成更快；训练仍使用语音模型。</translation>
+      <translation>采样步数从 40 步降到 4 步，生成更快；训练仍使用基础模型。</translation>
     </message>
     <message>
       <source>settings_page.generation_model</source>
@@ -3398,7 +3391,7 @@ Codec：Semantic DACVAE Japanese 32dim
     </message>
     <message>
       <source>settings_page.generation_model_hint</source>
-      <translation>“低显存”和“快速”在“开始使用”中下载对应模型后生效。</translation>
+      <translation>“低显存”和“快速”只对已在“开始使用”中下载了对应模型的基础模型生效，其他基础模型使用标准模型。</translation>
     </message>
     <message>
       <source>settings_page.model_standard</source>
@@ -3641,10 +3634,6 @@ Codec：Semantic DACVAE Japanese 32dim
       <translation>无法判断这个 LoRA 是为哪个基础模型训练的：缺少 config.json。</translation>
     </message>
     <message>
-      <source>exports.voice_for_another_base_model</source>
-      <translation>这个 LoRA 是为 {model} 训练的，本应用支持的是 {supported}，无法使用。</translation>
-    </message>
-    <message>
       <source>library_page.voice_import_files</source>
       <translation>模型包和 LoRA (*.irovoice *.zip *.7z *.rar adapter_config.json)</translation>
     </message>
@@ -3663,6 +3652,123 @@ Codec：Semantic DACVAE Japanese 32dim
     <message>
       <source>widgets.choose</source>
       <translation>选择</translation>
+    </message>
+    <message>
+      <source>base_models.base_not_recorded</source>
+      <translation>这个声音没有记录它训练时使用的基础模型，因此无法使用。</translation>
+    </message>
+    <message>
+      <source>base_models.generation_base_missing</source>
+      <translation>这个声音需要的基础模型尚未安装。请下载或导入后重试。</translation>
+    </message>
+    <message>
+      <source>base_models.import_no_architecture</source>
+      <translation>{file} 不是 Irodori TTS 基础模型：文件头中没有模型结构信息。</translation>
+    </message>
+    <message>
+      <source>base_models.import_no_tokenizer</source>
+      <translation>基础模型需要在 {file} 旁边带有分词器文件夹（tokenizer/tokenizer_config.json）。</translation>
+    </message>
+    <message>
+      <source>base_models.needs_catalog_base</source>
+      <translation>需要基础模型 {name}。请在“开始使用”中下载。</translation>
+    </message>
+    <message>
+      <source>base_models.needs_unknown_base</source>
+      <translation>需要尚未安装的基础模型（{name}）。请在“设置”中导入训练这个声音时使用的基础模型。</translation>
+    </message>
+    <message>
+      <source>base_models.trained_on_other_version</source>
+      <translation>训练时使用的是这个基础模型的另一个版本。</translation>
+    </message>
+    <message>
+      <source>base_models.unknown_catalog_base</source>
+      <translation>{name} 不是本应用可以下载的基础模型。</translation>
+    </message>
+    <message>
+      <source>base_models.variant_needs_base</source>
+      <translation>请先下载基础模型 {name}。</translation>
+    </message>
+    <message>
+      <source>common.lines</source>
+      <translation>{p0}
+{p1}</translation>
+    </message>
+    <message>
+      <source>generation_page.base_model</source>
+      <translation>基础模型</translation>
+    </message>
+    <message>
+      <source>generation_page.variant_not_installed</source>
+      <translation>{name} 没有安装{model}模型，将使用它的标准模型。</translation>
+    </message>
+    <message>
+      <source>generation_page.voice_base</source>
+      <translation>基础模型：{name}</translation>
+    </message>
+    <message>
+      <source>models.base_title</source>
+      <translation>{name}</translation>
+    </message>
+    <message>
+      <source>models.large_reason</source>
+      <translation>可选。比 Small 更大更慢，显存占用更多：训练需要 16 GB 或以上显存。使用须遵守 &lt;a href="{url}"&gt;Gemma 使用条款&lt;/a&gt;。</translation>
+    </message>
+    <message>
+      <source>settings_page.base_imported</source>
+      <translation>已导入</translation>
+    </message>
+    <message>
+      <source>settings_page.base_imported_as</source>
+      <translation>已导入基础模型 {name}。</translation>
+    </message>
+    <message>
+      <source>settings_page.base_update</source>
+      <translation>更新到 {revision}</translation>
+    </message>
+    <message>
+      <source>settings_page.base_version</source>
+      <translation>版本</translation>
+    </message>
+    <message>
+      <source>settings_page.import_base</source>
+      <translation>导入基础模型…</translation>
+    </message>
+    <message>
+      <source>settings_page.import_base_file</source>
+      <translation>模型文件（.safetensors）…</translation>
+    </message>
+    <message>
+      <source>settings_page.import_base_folder</source>
+      <translation>模型文件夹…</translation>
+    </message>
+    <message>
+      <source>settings_page.remove_base_message</source>
+      <translation>将从这台电脑上移除 {name}。用它训练的声音需要重新安装它才能使用。</translation>
+    </message>
+    <message>
+      <source>settings_page.safetensors_filter</source>
+      <translation>基础模型 (*.safetensors)</translation>
+    </message>
+    <message>
+      <source>settings_page.work_import_base</source>
+      <translation>正在导入基础模型</translation>
+    </message>
+    <message>
+      <source>training.base_does_not_match_run</source>
+      <translation>这次训练的模型设置与它的基础模型不一致。请开始新的训练。</translation>
+    </message>
+    <message>
+      <source>training.base_not_installed</source>
+      <translation>这次训练使用的 {name} 尚未安装。{hint}</translation>
+    </message>
+    <message>
+      <source>library_page.base_not_installed</source>
+      <translation>未安装</translation>
+    </message>
+    <message>
+      <source>worker.adapter_for_another_base</source>
+      <translation>这个声音是在另一个基础模型（{adapter}）上训练的，无法在 {base} 上运行。</translation>
     </message>
   </context>
 </TS>

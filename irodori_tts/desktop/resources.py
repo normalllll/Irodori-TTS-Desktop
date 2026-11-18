@@ -10,54 +10,12 @@ from irodori_tts.task_control import check_cancel
 
 from .storage import digest, read_json, write_json
 
-MODEL_REPO = "Aratako/Irodori-TTS-v4.1-Small"
-MODEL_REVISION = "2b28324dc263ed5e6638b3cf3dd94c82ead07b4b"
-# The speech model's shape, from its config_json metadata. An adapter trained for another model
-# (another size, another text encoder) records other values and cannot load onto this one.
-MODEL_ARCHITECTURE = {
-    "model_dim": 1280,
-    "num_layers": 12,
-    "num_heads": 20,
-    "text_tokenizer_repo": "sbintuitions/modernbert-ja-310m",
-    "text_dim": 512,
-    "speaker_dim": 768,
-    "speaker_layers": 8,
-    "duration_hidden_dim": 1024,
-    "duration_layers": 3,
-}
 CODEC_REPO = "Aratako/Semantic-DACVAE-Japanese-32dim"
 CODEC_REVISION = "47376ee24834d7a05a48ebabfe3cde29b3c5e214"
 WATERMARK_REVISION = "a1c4d021905e0dc5b24be5f68db5fc4dba410ee1"
-# Generation only: about a quarter less video memory, and the same speech at the same seed.
-LOW_VRAM_REPO = "Aratako/Irodori-TTS-v4.1-Small-Quantized"
-LOW_VRAM_REVISION = "ef04e6c3ba56138ae23e86a2eabc004f76990e37"
-LOW_VRAM_MODEL = "int8-weight-only/model.safetensors"
-LOW_VRAM_FILES = (
-    LOW_VRAM_MODEL,
-    "tokenizer/tokenizer.json",
-    "tokenizer/tokenizer_config.json",
-)
-# Generation only: the MeanFlow distillation of the speech model, four steps instead of forty.
-# Its guidance is trained in, so the guidance settings do not apply.
-FAST_REPO = "Aratako/Irodori-TTS-v4.1-Small-MF"
-FAST_REVISION = "ccc78f5d480b6e51b69b2d5042a14c4da04fea6e"
-FAST_MODEL = "model.safetensors"
-FAST_FILES = (
-    FAST_MODEL,
-    "tokenizer/tokenizer.json",
-    "tokenizer/tokenizer_config.json",
-)
-FAST_STEPS = 4
+# The pinned resources every base model shares. The base models themselves are not pinned:
+# they follow their repository's latest commit (see base_models).
 RESOURCE_SPEC = {
-    "model": {
-        "repo": MODEL_REPO,
-        "revision": MODEL_REVISION,
-        "files": [
-            "model.safetensors",
-            "tokenizer/tokenizer.json",
-            "tokenizer/tokenizer_config.json",
-        ],
-    },
     "codec": {"repo": CODEC_REPO, "revision": CODEC_REVISION, "files": ["weights.pth"]},
     "watermark": {
         "repo": "sony/silentcipher",
@@ -135,6 +93,28 @@ def resumable_blob(repo, filename, revision, *, cancel=None, progress=None) -> N
     partial.replace(blob)
 
 
+def resource_specs(root: Path) -> dict:
+    """The pinned shared resources and the installed catalog bases at their recorded commit,
+    in the shape {name: {"repo", "revision", "files"}}. A catalog base counts when its files
+    are in the download cache, where downloads and model packages place them."""
+    from .base_models import load_registry
+
+    specs = dict(RESOURCE_SPEC)
+    for base in load_registry(root):
+        entry = base.catalog
+        if (
+            entry is not None
+            and base.revision
+            and Path(base.checkpoint).resolve().is_relative_to(hf_home().resolve())
+        ):
+            specs[f"base/{base.id}"] = {
+                "repo": entry.repo,
+                "revision": base.revision,
+                "files": list(entry.files),
+            }
+    return specs
+
+
 def resolve_resources(
     root: Path,
     *,
@@ -144,12 +124,21 @@ def resolve_resources(
     cancel=None,
     repair=False,
     received=None,
+    bases=None,
 ) -> dict:
-    """The speech resources' local paths, downloading missing files when asked. progress gets
-    a message per file; received(n) the bytes a download just added."""
+    """The speech resources' local paths, downloading missing shared files when asked:
+    {"codec": path, "bases": {id: base record with "checkpoint" and "variants" paths}}.
+    progress gets a message per file; received(n) the bytes a download just added.
+
+    bases names the base ids a task uses: only the shared resources and those are checked,
+    so a damaged base the task does not use cannot fail it. None checks every installed
+    base. Files are hashed only to verify or repair; a check otherwise compares sizes and
+    keeps the hash a verification recorded (or none)."""
     from huggingface_hub import hf_hub_download
     from huggingface_hub.errors import LocalEntryNotFoundError
     from tqdm.auto import tqdm
+
+    from .base_models import base_record, load_registry
 
     class DownloadProgress(tqdm):
         def update(self, amount=1):
@@ -160,8 +149,26 @@ def resolve_resources(
 
     result = {}
     old = read_json(root / "resource-manifest.json", {})
-    manifest = {"resources": RESOURCE_SPEC, "files": {}}
-    for name, spec in RESOURCE_SPEC.items():
+    specs = resource_specs(root)
+    manifest = {"resources": specs, "files": {}}
+    if bases is not None:
+        wanted = {f"base/{base_id}" for base_id in bases}
+
+        def owner(key):
+            return "/".join(key.split("/")[:2])
+
+        # The other bases' records stay as the last full check left them.
+        manifest["files"] = {
+            key: value
+            for key, value in (old.get("files") or {}).items()
+            if key.startswith("base/") and owner(key) in specs and owner(key) not in wanted
+        }
+        specs = {
+            name: spec
+            for name, spec in specs.items()
+            if not name.startswith("base/") or name in wanted
+        }
+    for name, spec in specs.items():
         for filename in spec["files"]:
             check_cancel(cancel)
             if progress:
@@ -185,6 +192,7 @@ def resolve_resources(
                             local_files_only=not download,
                             force_download=repair,
                             tqdm_class=DownloadProgress,
+                            cache_dir=hf_home() / "hub",
                         )
                     )
                 except LocalEntryNotFoundError as exc:
@@ -198,7 +206,7 @@ def resolve_resources(
                     ) from exc
             key = f"{name}/{filename}"
             known = (old.get("files", {}).get(key) or {}).get("sha256")
-            checksum = digest(local) if verify or repair or not known else known
+            checksum = digest(local) if verify or repair else known
             if verify and not repair and known and checksum != known:
                 raise BusinessError(
                     t(
@@ -211,8 +219,18 @@ def resolve_resources(
                 "size": local.stat().st_size,
                 "sha256": checksum,
             }
-            if filename in {"model.safetensors", "weights.pth"}:
+            if filename == "weights.pth":
                 result[name] = str(local)
+    result["bases"] = {
+        base.id: {
+            **base_record(base),
+            "source": base.source,
+            "checkpoint": str(base.checkpoint),
+            "variants": {key: str(path) for key, path in base.variants.items()},
+        }
+        for base in load_registry(root)
+        if bases is None or base.id in bases
+    }
     write_json(root / "resource-manifest.json", manifest)
     pin_watermark_revision()
     return result
@@ -237,9 +255,11 @@ def hf_home() -> Path:
 
 def stored_path(path: Path) -> str:
     """Manifest paths are relative to the cache, so a moved application folder still finds
-    them; a file outside the cache keeps its absolute path."""
+    them; a file outside the cache keeps its absolute path. Symbolic links are kept, not
+    followed: a snapshot file links to a blob without its name, and a checkpoint is found by
+    its name and by the tokenizer folder beside it."""
     try:
-        return Path(path).resolve().relative_to(hf_home().resolve()).as_posix()
+        return Path(os.path.abspath(path)).relative_to(os.path.abspath(hf_home())).as_posix()
     except ValueError:
         return str(path)
 
@@ -255,7 +275,10 @@ def manifest_file(value: str) -> Path:
 
 
 def resource_state(root: Path) -> tuple[bool, float | None]:
-    """(ready, size in GB or None when nothing is recorded) from the manifest, by size only."""
+    """(ready, size in GB or None when nothing is recorded) from the manifest, by size only.
+    Ready means the shared resources are there and at least one base model is installed."""
+    from .base_models import load_registry
+
     manifest = read_json(root / "resource-manifest.json")
     if not isinstance(manifest, dict) or not isinstance(manifest.get("files"), dict):
         return False, None
@@ -272,18 +295,27 @@ def resource_state(root: Path) -> tuple[bool, float | None]:
             ready = ready and path.is_file() and path.stat().st_size == entry["size"]
         except (KeyError, TypeError, OSError):
             ready = False
+    bases = load_registry(root)
+    for base in bases:
+        if base.source == "imported":
+            size += base.checkpoint.stat().st_size
     # Decimal gigabytes, like every other size the application shows.
-    return ready, size / 1000**3
+    return ready and bool(bases), size / 1000**3
 
 
 def adopt_cached_resources(root: Path) -> bool:
     """Record resources that the cache already holds, without network access or hashing, so
-    a new data folder does not ask for a download the cache has already satisfied."""
+    a new data folder does not ask for a download the cache has already satisfied. Catalog
+    bases found complete in the cache are registered too."""
     from huggingface_hub import try_to_load_from_cache
 
+    from .base_models import adopt_cached_bases
+
+    adopt_cached_bases(root)
     old = read_json(root / "resource-manifest.json", {}) or {}
-    manifest = {"resources": RESOURCE_SPEC, "files": {}}
-    for name, spec in RESOURCE_SPEC.items():
+    specs = resource_specs(root)
+    manifest = {"resources": specs, "files": {}}
+    for name, spec in specs.items():
         for filename in spec["files"]:
             found = try_to_load_from_cache(
                 spec["repo"], filename, revision=spec["revision"], cache_dir=hf_home() / "hub"

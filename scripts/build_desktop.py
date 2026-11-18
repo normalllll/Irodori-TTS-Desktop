@@ -336,7 +336,8 @@ def main():
             (site / name).unlink(missing_ok=True)
         # No venv metadata, machine-specific Python path, or credentials are shipped.
     # Models are not shipped: every one of them can be downloaded (or imported from another
-    # user's files) in the application, which verifies them against model_pins.json.
+    # user's files) in the application, which verifies pinned files against model_pins.json
+    # and base models against their download or their package's own record.
     packaged_hub = destination / "resources/huggingface/hub"
     if packaged_hub.exists():
         if not packaged_hub.resolve().is_relative_to(allowed):

@@ -32,6 +32,7 @@ from irodori_tts.desktop.storage import (
 )
 from irodori_tts.desktop.tasks import TaskManager
 from irodori_tts.desktop.widgets import Expand, Table, apply_theme, label
+from tests.base_fixtures import install_base
 from tests.processes import managed_process
 from tests.qt_cleanup import cleanup_qt, stop_manager, stub_connection_check
 
@@ -132,7 +133,7 @@ class ProcessTests(unittest.TestCase):
         self.assertEqual(task["status"], "failed", task)
         self.assertEqual(
             str(task["message"]),
-            str(t("resources.verify_found_missing_file", file="model.safetensors")),
+            str(t("resources.verify_found_missing_file", file="weights.pth")),
         )
         self.assertEqual(list(empty_cache.rglob("*.safetensors")), [])
         released = []
@@ -398,6 +399,8 @@ with patch.object(QTimer, 'singleShot', side_effect=lambda delay, callback: orig
             with managed_process(
                 [sys.executable, "-c", code, *arguments],
                 cwd=self.repo,
+                # An empty download cache: the launch does not depend on this machine's models.
+                env={**os.environ, "HF_HOME": str(Path(directory) / "hf")},
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 creationflags=subprocess.CREATE_NO_WINDOW,
@@ -770,11 +773,30 @@ class ReviewFixTests(unittest.TestCase):
         self.assertAlmostEqual(page.duration_scale.value(), 0.9)
         self.assertEqual(page.references, [])
 
+    def test_a_new_data_folder_with_a_cached_base_opens_ready(self):
+        from irodori_tts.desktop import model_files
+
+        resources = Path(self.directory) / "resources"
+        with (
+            patch(
+                "irodori_tts.desktop.base_models.adopt_cached_bases",
+                side_effect=lambda root: [install_base(root)],
+            ) as adopt,
+            patch.object(model_files, "shared_ready", return_value=True),
+        ):
+            window = self.open_window(self.directory)
+            # Before any event runs: the first frame already counts the cached base.
+            adopt.assert_called_once_with(resources)
+            self.assertIsNot(window.stack.currentWidget(), window.guide)
+            self.assertTrue(window.generation.speech_ready)
+
     def test_without_the_speech_model_the_guide_opens_and_actions_wait(self):
         from irodori_tts.desktop import model_files
 
         speech = model_files.download_for(model_files.SPEECH)
         with (
+            # No base comes from the machine's download cache either.
+            patch("irodori_tts.desktop.base_models.adopt_cached_bases", return_value=[]),
             patch.object(model_files, "speech_ready", return_value=False),
             patch.object(
                 model_files.Download,
@@ -803,6 +825,7 @@ class ReviewFixTests(unittest.TestCase):
                 guide.download()
             payload = start.call_args.args[0]
             self.assertEqual(payload["kind"], "resources")
+            self.assertEqual(payload["bases"], ["v4.1-small"])
             self.assertEqual(
                 payload["then"],
                 {"kind": "models", "backends": ["whisper-large-v3", "qwen3-asr"]},
@@ -817,16 +840,25 @@ class ReviewFixTests(unittest.TestCase):
                 start.call_args.args[0], {"kind": "models", "backends": ["anime-whisper"]}
             )
             self.assertEqual(guide.downloading, {"anime-whisper"})
-            # The low video memory model is a download of its own.
+            # The low video memory model is a download of its own, after its base.
+            low_vram = model_files.variant_key("v4.1-small", model_files.LOW_VRAM)
             with (
                 patch.object(window.tasks, "start") as start,
                 patch.object(model_files.Download, "installed", return_value=False),
                 patch("irodori_tts.desktop.asr.missing_addons", return_value=[]),
             ):
-                guide.download([model_files.LOW_VRAM])
+                guide.download([low_vram])
             self.assertEqual(
-                start.call_args.args[0], {"kind": "models", "backends": [model_files.LOW_VRAM]}
+                start.call_args.args[0],
+                {
+                    "kind": "resources",
+                    "bases": ["v4.1-small"],
+                    "then": {"kind": "models", "backends": [low_vram]},
+                },
             )
+            # Each catalog base has a line of its own, and Large names its terms of use.
+            large = guide.rows[model_files.base_key("v4-large")]
+            self.assertIn("GEMMA_TERMS_OF_USE", large.detail.text())
             self.assertGreater(speech.size, 3 * 1000**3)
             # Getting started is a page of its own, restored like the others.
             window.save_ui()
@@ -1317,12 +1349,16 @@ class ModelsAndSetupTests(unittest.TestCase):
 
         page = self.page
         values = {**RECOMMENDED, "max_steps": 40, "batch_size": 1, "gradient_accumulation_steps": 2}
+        resources = self.window.resource_root
+        self.addCleanup(shutil.rmtree, resources / "bases", True)
+        self.addCleanup((resources / "base-models.json").unlink, True)
+        base = install_base(resources)
+        page.refresh_bases()
         with (
             patch(
                 "irodori_tts.desktop.training.validate_initialization",
                 return_value={"id": "init", "revision": 1, "count": 2},
             ),
-            patch("irodori_tts.desktop.resources.resolve_resources", return_value={}),
             patch("irodori_tts.desktop.training.training_config", return_value={"train": {}}),
             patch.object(self.window.tasks, "start") as start,
         ):
@@ -1340,7 +1376,9 @@ class ModelsAndSetupTests(unittest.TestCase):
                 self.assertNotEqual(run.name, record["id"])
                 self.assertEqual(page.runs.item()["id"], record["id"])
                 self.assertEqual(page.run_stack.currentIndex(), 1)
-                self.assertEqual(page.run_title.full_text, name)
+                # The run keeps the base it was created on, and its title names it.
+                self.assertEqual(record["base"]["id"], base.id)
+                self.assertEqual(page.run_title.full_text, f"{name} · {base.name}")
                 self.app.processEvents()
                 self.assertEqual(page.runs.item()["id"], record["id"])
                 page.refresh()
@@ -1432,8 +1470,11 @@ class ModelsAndSetupTests(unittest.TestCase):
         self.assertTrue(models.imported.switch_button.isHidden())
 
     def test_every_run_with_a_complete_checkpoint_is_a_model(self):
-        from irodori_tts.desktop.resources import MODEL_REPO, MODEL_REVISION
+        from irodori_tts.desktop.base_models import base_record
 
+        base = install_base(self.window.resource_root)
+        self.addCleanup(shutil.rmtree, self.window.resource_root / "bases", True)
+        self.addCleanup((self.window.resource_root / "base-models.json").unlink, True)
         run_root = self.root / "runs" / "r1"
         checkpoint = run_root / "checkpoints" / "checkpoint_0000100"
         checkpoint.mkdir(parents=True)
@@ -1454,11 +1495,12 @@ class ModelsAndSetupTests(unittest.TestCase):
                 "checkpoint": "runs/r1/checkpoints/checkpoint_0000100",
                 # Nothing needs adding to a list: a run with a checkpoint is a model.
                 "registered": False,
-                "base": {"repo": MODEL_REPO, "revision": MODEL_REVISION},
+                "base": base_record(base),
                 "config": {"train": {"max_steps": 1000, "save_every": 100, "learning_rate": 1e-4}},
             },
         )
-        self.assertIn("r1", self.window.voice_entries())
+        entry = self.window.voice_entries()["r1"]
+        self.assertEqual((entry["base_id"], entry["base_status"]), ("v4.1-small", "exact"))
         self.window.refresh()
         self.page.select_run_id("r1")
         self.assertFalse(self.page.use_button.isHidden())
@@ -1537,7 +1579,9 @@ class ModelsAndSetupTests(unittest.TestCase):
         write_json(directory / "request.json", payload)
         with patch.object(page, "create_and_train") as create:
             page.continue_training(task)
-        create.assert_called_once_with("Run A", payload["train"]["values"])
+        create.assert_called_once_with(
+            "Run A", payload["train"]["values"], payload["train"].get("base")
+        )
         with patch.object(page, "create_and_train") as create:
             page.continue_training({**task, "status": "failed"})
         create.assert_not_called()
@@ -1845,37 +1889,160 @@ class ModelsAndSetupTests(unittest.TestCase):
         self.assertEqual(page.num_candidates.value(), 3)
         self.assertEqual(page.request()["num_candidates"], 3)
 
+    def use_bases(self, *bases):
+        """Install these bases (id or (id, kwargs)) for one test and show them on Generate."""
+        root = self.window.resource_root
+        self.addCleanup(shutil.rmtree, root / "bases", True)
+        self.addCleanup((root / "base-models.json").unlink, True)
+        installed = []
+        for base in bases:
+            base_id, options = base if isinstance(base, tuple) else (base, {})
+            installed.append(install_base(root, base_id, **options))
+        self.window.generation.refresh_bases()
+        return installed
+
     def test_the_fast_model_takes_its_own_steps_for_every_voice(self):
         from irodori_tts.desktop import model_files
 
         page = self.window.generation
         settings = self.window.store.settings
         self.addCleanup(settings.pop, "generation_model", None)
+        self.use_bases(("v4.1-small", {"variants": ("fast",)}))
         page.text.setPlainText("あ。")
         page.speaker_strength.setValue(1.5)
         self.assertEqual(page.request()["speaker_kv_scale"], 1.5)
         settings["generation_model"] = model_files.FAST
-        with patch.object(model_files.Download, "installed", return_value=True):
-            page.show_generation_model()
-            self.assertEqual(page.generation_model(), model_files.FAST)
-            self.assertFalse(page.steps.isEnabled())
-            self.assertFalse(page.cfg_speaker.isEnabled())
-            self.assertFalse(page.fast_note.isHidden())
-            request = page.request()
-            self.assertEqual(request["num_steps"], 4)
-            self.assertIsNone(request["speaker_kv_scale"])
-            # A trained voice uses it too, with its adapter.
-            page.voices = {"v": {"name": "v", "adapter": "a"}}
-            add_item(page.voice, "v", userData="v")
-            page.voice.setCurrentIndex(page.voice.findData("v"))
-            self.assertEqual(page.generation_model(), model_files.FAST)
-            self.assertFalse(page.steps.isEnabled())
-            self.assertEqual(page.request()["lora_adapter"], "a")
-            self.assertEqual(page.request()["num_steps"], 4)
-        # Not downloaded: the speech model.
+        page.show_generation_model()
+        self.assertEqual(page.generation_model(), model_files.FAST)
+        self.assertFalse(page.steps.isEnabled())
+        self.assertFalse(page.cfg_speaker.isEnabled())
+        self.assertFalse(page.fast_note.isHidden())
+        request = page.request()
+        self.assertEqual(request["num_steps"], 4)
+        self.assertIsNone(request["speaker_kv_scale"])
+        # A trained voice on that base uses it too, with its adapter.
+        page.voices = {
+            "v": {
+                "name": "v",
+                "adapter": "a",
+                "base_id": "v4.1-small",
+                "base_name": "Irodori-TTS v4.1 Small",
+                "base_note": None,
+                "base_problem": None,
+            }
+        }
+        add_item(page.voice, "v", userData="v")
+        page.voice.setCurrentIndex(page.voice.findData("v"))
+        self.assertEqual(page.generation_model(), model_files.FAST)
+        self.assertFalse(page.steps.isEnabled())
+        self.assertEqual(page.request()["lora_adapter"], "a")
+        self.assertEqual(page.request()["num_steps"], 4)
+
+    def test_regenerating_an_unlisted_voice_uses_the_base_its_files_describe(self):
+        from irodori_tts.desktop.base_models import SMALL_ARCHITECTURE
+
+        page = self.window.generation
+        settings = self.window.store.settings
+        self.addCleanup(settings.pop, "generation_base", None)
+        self.use_bases("v4.1-small", "v4-large")
         page.voice.setCurrentIndex(0)
-        with patch.object(model_files.Download, "installed", return_value=False):
-            self.assertIsNone(page.generation_model())
+        page.base.setCurrentIndex(page.base.findData("v4-large"))
+        adapter = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, adapter, True)
+        write_json(adapter / "config.json", {"model": SMALL_ARCHITECTURE, "train": {}})
+        # An older record: no base, and a voice that is no longer listed.
+        item = {
+            "voice": "gone",
+            "voice_id": "gone",
+            "request": {"text": "あ。", "lora_adapter": str(adapter)},
+        }
+        with patch.object(self.window.tasks, "start") as start:
+            page.regenerate(item)
+        self.assertEqual(start.call_args.args[0]["base"], "v4.1-small")
+        # Only another architecture installed: it says what is needed instead of generating.
+        shutil.rmtree(self.window.resource_root / "bases")
+        (self.window.resource_root / "base-models.json").unlink()
+        self.use_bases("v4-large")
+        with patch.object(self.window.tasks, "start") as start:
+            with self.assertRaises(BusinessError) as raised:
+                page.regenerate(item)
+        start.assert_not_called()
+        self.assertEqual(raised.exception.message.key, "base_models.needs_catalog_base")
+        # Nothing tells its architecture: unknown, and refused as well.
+        (adapter / "config.json").unlink()
+        with patch.object(self.window.tasks, "start") as start:
+            with self.assertRaises(BusinessError) as raised:
+                page.regenerate(item)
+        start.assert_not_called()
+        self.assertEqual(raised.exception.message.key, "base_models.base_not_recorded")
+
+    def test_a_base_without_the_chosen_variant_uses_its_standard_model_and_says_so(self):
+        from irodori_tts.desktop import model_files
+
+        page = self.window.generation
+        settings = self.window.store.settings
+        self.addCleanup(settings.pop, "generation_model", None)
+        self.addCleanup(settings.pop, "generation_base", None)
+        self.use_bases(("v4.1-small", {"variants": ("fast",)}), "v4-large")
+        settings["generation_model"] = model_files.FAST
+        page.voice.setCurrentIndex(0)
+        page.base.setCurrentIndex(page.base.findData("v4-large"))
+        self.assertEqual(settings["generation_base"], "v4-large")
+        self.assertIsNone(page.generation_model())
+        self.assertTrue(page.steps.isEnabled())
+        self.assertFalse(page.base_note.isHidden())
+        self.assertIn("Irodori-TTS v4 Large", page.base_note.text())
+        page.base.setCurrentIndex(page.base.findData("v4.1-small"))
+        self.assertEqual(page.generation_model(), model_files.FAST)
+        self.assertTrue(page.base_note.isHidden())
+
+    def test_generate_uses_the_chosen_base_or_the_voices_own(self):
+        page = self.window.generation
+        settings = self.window.store.settings
+        self.addCleanup(settings.pop, "generation_base", None)
+        self.use_bases("v4.1-small", "v4-large")
+        page.text.setPlainText("あ。")
+        page.speech_ready = True
+        page.voice.setCurrentIndex(0)
+        # With two bases, the default voice offers the choice.
+        self.assertFalse(page.base_field.isHidden())
+        page.base.setCurrentIndex(page.base.findData("v4-large"))
+        with patch.object(self.window.tasks, "start") as start:
+            page.generate()
+        self.assertEqual(start.call_args.args[0]["base"], "v4-large")
+        # A trained voice speaks on its own base; the choice gives way to its name.
+        page.voices = {
+            "v": {
+                "name": "v",
+                "adapter": "a",
+                "base_id": "v4.1-small",
+                "base_name": "Irodori-TTS v4.1 Small",
+                "base_note": "note",
+                "base_problem": None,
+            },
+            "gone": {
+                "name": "gone",
+                "adapter": "g",
+                "base_id": None,
+                "base_name": None,
+                "base_note": None,
+                "base_problem": "needs another base",
+            },
+        }
+        for key in page.voices:
+            add_item(page.voice, key, userData=key)
+        page.voice.setCurrentIndex(page.voice.findData("v"))
+        self.assertTrue(page.base_field.isHidden())
+        self.assertIn("Irodori-TTS v4.1 Small", page.base_note.text())
+        self.assertIn("note", page.base_note.text())
+        with patch.object(self.window.tasks, "start") as start:
+            page.generate()
+        self.assertEqual(start.call_args.args[0]["base"], "v4.1-small")
+        page.voice.setCurrentIndex(page.voice.findData("gone"))
+        self.assertIn("needs another base", page.base_note.text())
+        with patch.object(self.window.tasks, "start") as start, self.assertRaises(BusinessError):
+            page.generate()
+        start.assert_not_called()
 
     def test_importing_a_package_asks_only_between_the_adapters_that_fit(self):
         from irodori_tts.desktop import library_page
@@ -1911,18 +2078,17 @@ class ModelsAndSetupTests(unittest.TestCase):
 
         store = self.window.store
         self.addCleanup(store.settings.pop, "generation_model", None)
+        self.use_bases(("v4.1-small", {"variants": ("low_vram", "fast")}))
         combo = self.window.settings_page.generation_model
         combo.setCurrentIndex(combo.findData(model_files.LOW_VRAM))
         self.assertEqual(AppStore(store.root).settings["generation_model"], model_files.LOW_VRAM)
         page = self.window.generation
         page.text.setPlainText("あ。")
         page.speech_ready = True
-        with (
-            patch.object(model_files.Download, "installed", return_value=True),
-            patch.object(self.window.tasks, "start") as start,
-        ):
+        with patch.object(self.window.tasks, "start") as start:
             page.generate()
             self.assertEqual(start.call_args.args[0]["model"], model_files.LOW_VRAM)
+            self.assertEqual(start.call_args.args[0]["base"], "v4.1-small")
             self.assertTrue(page.steps.isEnabled())
             # Generate shows the fast model's fields as soon as Settings chooses it.
             combo.setCurrentIndex(combo.findData(model_files.FAST))
@@ -2432,6 +2598,27 @@ class TranscriptionPageTests(unittest.TestCase):
             self.app.processEvents()
             time.sleep(0.05)
         self.assertFalse(folder.exists())
+
+    def test_settings_list_each_installed_base_with_its_version(self):
+        page = self.window.settings_page
+        root = self.window.resource_root
+        self.addCleanup(shutil.rmtree, root / "bases", True)
+        self.addCleanup((root / "base-models.json").unlink, True)
+        install_base(root, "v4.1-small")
+        install_base(root, "imported-aaaaaaaaaaaa", name="Mine")
+        page.latest = {"v4.1-small": "f" * 40}
+        page.refresh()
+        rows = {row["id"]: row for row in page.base_table.rows_model.rows}
+        self.assertEqual(str(rows["v4.1-small"]["version"]), "rev1")
+        self.assertEqual(
+            str(rows["imported-aaaaaaaaaaaa"]["version"]), str(t("settings_page.base_imported"))
+        )
+        # A newer commit upstream offers the update, and the update is a download task.
+        with patch.object(self.window.tasks, "start") as start:
+            page.update_base(rows["v4.1-small"])
+        self.assertEqual(
+            start.call_args.args[0], {"kind": "resources", "bases": ["v4.1-small"], "update": True}
+        )
 
     def test_downloaded_models_are_listed_with_sizes_and_can_be_removed(self):
         page = self.window.settings_page

@@ -14,7 +14,8 @@ from pathlib import Path, PurePosixPath
 from irodori_tts.desktop.messages import BusinessError, fmt, t
 
 from . import APP_VERSION
-from .resources import MODEL_ARCHITECTURE, MODEL_REPO, MODEL_REVISION, RESOURCE_SPEC, hf_home
+from .base_models import CATALOG, architecture_of_config, normalize_record
+from .resources import RESOURCE_SPEC, hf_home
 from .storage import (
     folder_name,
     free_folder,
@@ -39,9 +40,20 @@ def export_audio_file(source: Path, destination: Path):
         temporary.unlink(missing_ok=True)
 
 
+def run_bases(root: Path) -> list[dict]:
+    """The base records of a project's runs, each once."""
+    bases = []
+    for path in sorted((root / "runs").glob("*/run.json")):
+        record = normalize_record((read_json(path, {}) or {}).get("base"))
+        if record is not None and record not in bases:
+            bases.append(record)
+    return bases
+
+
 def export_project(root: Path, destination: Path):
     with project_lock(root):
         load_project(root)
+        bases = run_bases(root)
         temporary = destination.with_name(f".{destination.name}.{identity()}.partial")
         try:
             with zipfile.ZipFile(temporary, "w", zipfile.ZIP_DEFLATED, allowZip64=True) as archive:
@@ -59,7 +71,7 @@ def export_project(root: Path, destination: Path):
                         {
                             "kind": "project",
                             "format_version": 1,
-                            "base": RESOURCE_SPEC,
+                            "base": bases,
                             "created": now(),
                         },
                         ensure_ascii=False,
@@ -120,11 +132,18 @@ def renumber_run(root: Path, run_root: Path, run: dict) -> Path:
     return run_root
 
 
+def resolved_base(run: dict) -> dict:
+    """The run's base record with its architecture, which a voice needs to find its base."""
+    base = normalize_record(run.get("base"))
+    if base is None or not base.get("architecture"):
+        raise BusinessError(t("exports.unable_to_resolve_the_base_model"))
+    return base
+
+
 def export_voice(root: Path, run: dict, destination: Path):
     with project_lock(root):
         checkpoint = within(root, run["checkpoint"])
-        if run["base"] != {"repo": MODEL_REPO, "revision": MODEL_REVISION}:
-            raise BusinessError(t("exports.unable_to_resolve_the_base_model"))
+        base = resolved_base(run)
         temporary = destination.with_name(f".{destination.name}.{identity()}.partial")
         try:
             with zipfile.ZipFile(temporary, "w", zipfile.ZIP_DEFLATED) as archive:
@@ -138,7 +157,7 @@ def export_voice(root: Path, run: dict, destination: Path):
                     path = checkpoint / name
                     if path.is_file():
                         if name == "irodori_lora_metadata.json":
-                            archive.writestr(name, json.dumps({"base_resource": run["base"]}))
+                            archive.writestr(name, json.dumps({"base_resource": base}))
                         else:
                             archive.write(path, name)
                 # The inference settings tuned for this model travel with it; reference
@@ -158,7 +177,7 @@ def export_voice(root: Path, run: dict, destination: Path):
                             "format_version": 1,
                             "id": run["id"],
                             "name": run["name"],
-                            "base": run["base"],
+                            "base": base,
                             "step": run["step"],
                         },
                         ensure_ascii=False,
@@ -299,7 +318,7 @@ def _package_source(source: Path) -> Path:
     return source.parent if source.name == "adapter_config.json" else source
 
 
-def voice_candidates(source: Path, parent: Path) -> list[dict]:
+def voice_candidates(source: Path, parent: Path, bases=()) -> list[dict]:
     """The adapters of a voice package: {"folder", "name", "problem"} for each folder holding
     one, problem being why it cannot be used here (None when it can). The user chooses between
     the usable ones when there are several (several checkpoints, or several sizes of a voice);
@@ -321,7 +340,9 @@ def voice_candidates(source: Path, parent: Path) -> list[dict]:
             {
                 "folder": folder,
                 "name": _voice_name(source, folder, len(folders) > 1),
-                "problem": _incompatibility(within(stage / "meta", folder or "."), final=False),
+                "problem": _incompatibility(
+                    within(stage / "meta", folder or "."), bases, final=False
+                ),
             }
             for folder in folders
         ]
@@ -336,24 +357,13 @@ def _package_folders(package: _Package, source: Path) -> list[str]:
     return folders
 
 
-def _incompatibility(folder: Path, *, final: bool):
-    """Why the adapter whose files are in folder cannot be used with the speech model, or None.
-    This application's packages name their base model; the trainer's are judged by their
-    shape. Without the weights at hand (final=False) an adapter nothing describes passes."""
-    voice = read_json(folder / "voice.json") if (folder / "voice.json").is_file() else None
-    if isinstance(voice, dict):
-        if voice.get("base") != {"repo": MODEL_REPO, "revision": MODEL_REVISION}:
-            return t("exports.this_voice_uses_a_different_base_model")
-        return None
-    mismatch = _architecture_mismatch(folder)
-    if mismatch == {}:
-        return t("exports.voice_base_model_unknown") if final else None
-    if mismatch:
-        return t(
-            "exports.voice_for_another_base_model",
-            model=fmt(_describe(mismatch, folder), "", -1),
-            supported=fmt(MODEL_REPO.split("/")[-1], "", -1),
-        )
+def _incompatibility(folder: Path, bases, *, final: bool):
+    """Why the adapter whose files are in folder cannot be imported, or None. A voice is kept
+    when its architecture is known, even when no installed base has it yet: Generate then
+    names the base to download or import. Without the weights at hand (final=False) an
+    adapter nothing describes passes."""
+    if final and _voice_base(folder, bases) is None:
+        return t("exports.voice_base_model_unknown")
     return None
 
 
@@ -374,29 +384,52 @@ def _voice_name(source: Path, folder: str, several: bool) -> str:
     return name
 
 
-def _architecture_mismatch(folder: Path) -> dict | None:
-    """What makes this adapter another model's, or None when it fits the speech model: from
-    the trainer's config.json, else from the adapter's tensor shapes."""
+def adapter_architecture(folder: Path, bases=()) -> dict | None:
+    """The architecture of the base the adapter in folder was trained on, from its own files
+    (voice.json, the trainer's config.json, else its tensor shapes); None when they do not
+    tell. Only metadata and the safetensors header are read."""
+    record = _voice_base(Path(folder), bases) if Path(folder).is_dir() else None
+    return record["architecture"] if record else None
+
+
+def _voice_base(folder: Path, bases) -> dict | None:
+    """The base record of the adapter in folder, or None when nothing tells its architecture.
+    This application's packages record their base; the trainer's config.json records the
+    model; failing both, the adapter's tensor shapes identify a known base by width and depth.
+    """
+    voice = read_json(folder / "voice.json") if (folder / "voice.json").is_file() else None
+    if isinstance(voice, dict):
+        record = normalize_record(voice.get("base"))
+        if record is not None and record.get("architecture"):
+            return record
     config = read_json(folder / "config.json") if (folder / "config.json").is_file() else None
     model = config.get("model") if isinstance(config, dict) else None
-    if isinstance(model, dict):
-        differing = {
-            key: model[key]
-            for key, value in MODEL_ARCHITECTURE.items()
-            if key in model and model[key] != value
-        }
-        return differing or None
+    architecture = architecture_of_config(model) if isinstance(model, dict) else None
     weights = folder / "adapter_model.safetensors"
-    if weights.is_file():
+    if architecture is None and weights.is_file():
         found = _safetensors_blocks(weights)
-        if found and (
-            found["model_dim"] != MODEL_ARCHITECTURE["model_dim"]
-            or found["num_layers"] > MODEL_ARCHITECTURE["num_layers"]
-        ):
-            return found
+        known = [entry.architecture for entry in CATALOG] + [b.architecture for b in bases]
+        shaped = [
+            candidate
+            for candidate in known
+            if found
+            and candidate["model_dim"] == found["model_dim"]
+            and candidate["num_layers"] == found["num_layers"]
+        ]
+        if shaped and all(candidate == shaped[0] for candidate in shaped):
+            architecture = shaped[0]
+    if architecture is None:
         return None
-    # A .bin adapter without a config.json: nothing says which model it is for.
-    return {}
+    entry = next((entry for entry in CATALOG if entry.architecture == architecture), None)
+    # Who trained it and on which commit is not known: the record names only the shape (and
+    # the catalog base of that shape, for the download hint).
+    return {
+        "id": entry.id if entry else None,
+        "name": entry.name if entry else None,
+        "repo": entry.repo if entry else None,
+        "revision": None,
+        "architecture": architecture,
+    }
 
 
 def _safetensors_blocks(path: Path) -> dict | None:
@@ -420,18 +453,10 @@ def _safetensors_blocks(path: Path) -> dict | None:
     return {"model_dim": max(widths), "num_layers": max(layers) + 1}
 
 
-def _describe(mismatch: dict, folder: Path) -> str:
-    """The model an adapter was trained for, as well as the package tells."""
-    for name in ("base_model.json", "irodori_lora_metadata.json"):
-        record = read_json(folder / name) if (folder / name).is_file() else None
-        if isinstance(record, dict) and isinstance(record.get("repo_id"), str):
-            return record["repo_id"]
-    return ", ".join(f"{key} {value}" for key, value in mismatch.items())
-
-
-def import_voice(source: Path, parent: Path, folder: str | None = None):
+def import_voice(source: Path, parent: Path, folder: str | None = None, bases=()):
     """Import a voice from a package; folder is the one of voice_candidates to take, needed
-    when the package holds several adapters."""
+    when the package holds several adapters. bases are the installed bases, which also
+    identify an adapter by its shape."""
     source = _package_source(source)
     parent.mkdir(parents=True, exist_ok=True)
     stage = within(parent, f".import-{identity()}.partial")
@@ -454,9 +479,9 @@ def import_voice(source: Path, parent: Path, folder: str | None = None):
         taken = [_inside(folder, name) for name in wanted if _inside(folder, name) in present]
         package.copy(taken, voice_root)
 
-        problem = _incompatibility(voice_root, final=True)
-        if problem is not None:
-            raise BusinessError(problem)
+        base = _voice_base(voice_root, bases)
+        if base is None:
+            raise BusinessError(t("exports.voice_base_model_unknown"))
         voice = (
             read_json(voice_root / "voice.json") if (voice_root / "voice.json").is_file() else None
         )
@@ -464,11 +489,11 @@ def import_voice(source: Path, parent: Path, folder: str | None = None):
             voice = {
                 "format_version": 1,
                 "name": _voice_name(source, folder, len(folders) > 1),
-                "base": {"repo": MODEL_REPO, "revision": MODEL_REVISION},
             }
             match = re.search(r"checkpoint_(?:best_val_loss_)?(\d+)", folder)
             if match:
                 voice["step"] = int(match[1])
+        voice["base"] = base
         (voice_root / "base_model.json").unlink(missing_ok=True)
         root = voice_folder(parent, voice.get("name") or source.stem)
         voice.setdefault("id", root.name)
@@ -478,7 +503,7 @@ def import_voice(source: Path, parent: Path, folder: str | None = None):
         # The trainer's metadata names a base checkpoint by a path of its own computer.
         write_json(
             voice_root / "irodori_lora_metadata.json",
-            {"base_resource": {"repo": MODEL_REPO, "revision": MODEL_REVISION}},
+            {"base_resource": base},
         )
         voice_root.replace(root)
         return root
@@ -495,7 +520,8 @@ def register_checkpoint_voice(root: Path, run: dict, checkpoint: Path, parent: P
         within(root, relative)
         if not name.strip() or not complete_checkpoint(checkpoint):
             raise BusinessError(t("exports.select_a_complete_checkpoint_and_enter_a"))
-        if run["base"] != {"repo": MODEL_REPO, "revision": MODEL_REVISION}:
+        base = normalize_record(run.get("base"))
+        if base is None or not base.get("architecture"):
             raise BusinessError(t("exports.unable_to_resolve_the_checkpoint_base_model"))
         parent.mkdir(parents=True, exist_ok=True)
         voice_id = voice_folder(parent, name.strip()).name
@@ -516,14 +542,14 @@ def register_checkpoint_voice(root: Path, run: dict, checkpoint: Path, parent: P
                 source = within(root, relative / filename)
                 if source.is_file():
                     shutil.copyfile(source, stage / filename)
-            write_json(stage / "irodori_lora_metadata.json", {"base_resource": run["base"]})
+            write_json(stage / "irodori_lora_metadata.json", {"base_resource": base})
             write_json(
                 stage / "voice.json",
                 {
                     "format_version": 1,
                     "id": voice_id,
                     "name": name.strip(),
-                    "base": run["base"],
+                    "base": base,
                     "step": step,
                     "created": now(),
                     "registered": True,

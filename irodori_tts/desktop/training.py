@@ -9,8 +9,18 @@ from irodori_tts.desktop.messages import BusinessError, fmt, t
 from irodori_tts.upstream import upstream_file
 
 from . import INITIALIZATION_RULES_VERSION
+from .base_models import (
+    InstalledBase,
+    architecture_of_config,
+    base_record,
+    describe,
+    load_registry,
+    match_record,
+    missing_message,
+    normalize_record,
+)
 from .materials import materials_fingerprint
-from .resources import CODEC_REVISION, MODEL_REPO, MODEL_REVISION
+from .resources import CODEC_REVISION
 from .storage import (
     digest,
     folder_name,
@@ -202,7 +212,27 @@ def validate_run_binding(root: Path, run: dict) -> dict:
     record = validate_initialization(root)
     if run.get("initialization_id") != record["id"] or run.get("revision") != record["revision"]:
         raise BusinessError(t("training.the_data_version_bound_to_this_run"))
+    # The run's adapter has the shape of the base it records; its model settings must too.
+    base = normalize_record(run.get("base"))
+    model = architecture_of_config((run.get("config") or {}).get("model") or {})
+    if base is None or not base.get("architecture") or model != base["architecture"]:
+        raise BusinessError(t("training.base_does_not_match_run"))
     return record
+
+
+def run_base(run: dict, bases: list[InstalledBase]) -> InstalledBase:
+    """The installed base a run trains on: the one it was created with, else one of the same
+    architecture. Fails naming the base when none is installed."""
+    match = match_record(run.get("base"), bases)
+    if match.base is None:
+        raise BusinessError(
+            t(
+                "training.base_not_installed",
+                name=fmt(describe(run.get("base")), "", -1),
+                hint=missing_message(match, run.get("base")),
+            )
+        )
+    return match.base
 
 
 def run_names(root: Path) -> set[str]:
@@ -227,7 +257,7 @@ def unique_run_name(root: Path, name: str) -> str:
     return f"{name} {number}"
 
 
-def training_config(resources: dict) -> dict:
+def training_config(checkpoint) -> dict:
     """Use the same published model definition for resource probes and real training."""
     from dataclasses import fields
 
@@ -240,7 +270,7 @@ def training_config(resources: dict) -> dict:
         upstream_file("configs/train_v4_small_lora.yaml").read_text(encoding="utf-8")
     )
     # Only the metadata is read; framework="pt" would import torch into the window's process.
-    with safe_open(resources["model"], framework="np") as stream:
+    with safe_open(str(checkpoint), framework="np") as stream:
         published = json.loads(stream.metadata()["config_json"])
     model_fields = {field.name for field in fields(ModelConfig)}
     config["model"] = {key: value for key, value in published.items() if key in model_fields}
@@ -248,15 +278,16 @@ def training_config(resources: dict) -> dict:
 
 
 def create_run(
-    root: Path, name: str, values: dict, repo: Path, resource_root: Path | None = None
+    root: Path, name: str, values: dict, base: InstalledBase, resource_root: Path | None = None
 ) -> Path:
-    from .resources import resolve_resources
-
+    """A new run on base. The train section is the published LoRA configuration for every
+    base (its settings do not depend on the model size); the model section is the base's."""
     record = validate_initialization(root)
     if not name.strip():
         raise BusinessError(t("training.enter_a_voice_name"))
-    resources = resolve_resources(resource_root or repo / "outputs/desktop/resources")
-    config = training_config(resources)
+    if resource_root is not None and not any(b.id == base.id for b in load_registry(resource_root)):
+        raise BusinessError(t("training.base_not_installed", name=fmt(base.name, "", -1), hint=""))
+    config = training_config(base.checkpoint)
     config["train"].update(normalize_preset(values, record["count"]))
     run_id = identity()
     run_name = unique_run_name(root, name)
@@ -278,7 +309,7 @@ def create_run(
             "checkpoint": None,
             "registered": False,
             "preview_status": "pending",
-            "base": {"repo": MODEL_REPO, "revision": MODEL_REVISION},
+            "base": base_record(base),
         },
     )
     return run_root
@@ -418,7 +449,9 @@ def latest_checkpoint(run_root: Path) -> tuple[Path | None, int]:
     return path, step
 
 
-def extend_run(root: Path, run_root: Path, total: int, save_every: int) -> None:
+def extend_run(
+    root: Path, run_root: Path, total: int, save_every: int, bases: list | None = None
+) -> None:
     """Let a finished run train on from where it ended to total steps, saving every
     save_every steps; Resume then continues it (the trainer checks only the LoRA settings).
 
@@ -428,6 +461,8 @@ def extend_run(root: Path, run_root: Path, total: int, save_every: int) -> None:
     and the samples made from it follow it."""
     run = read_json(run_root / "run.json")
     validate_run_binding(root, run)
+    if bases is not None:
+        run_base(run, bases)
     if total <= run["step"]:
         raise BusinessError(t("training.more_steps_than_done", step=run["step"]))
     checkpoint = within(root, run["checkpoint"]) if run.get("checkpoint") else None
@@ -453,8 +488,10 @@ def extend_run(root: Path, run_root: Path, total: int, save_every: int) -> None:
     write_json(run_root / "run.json", run)
 
 
-def resume_eligibility(root: Path, run: dict) -> None:
+def resume_eligibility(root: Path, run: dict, bases: list | None = None) -> None:
     validate_run_binding(root, run)
+    if bases is not None:
+        run_base(run, bases)
     _validate_resume_checkpoint(root, run)
 
 
@@ -479,9 +516,12 @@ def write_trainer_config(run_root: Path) -> Path:
     return path
 
 
-def run_command(root: Path, run_root: Path, resources: dict, *, resume=False) -> list[str]:
+def run_command(
+    root: Path, run_root: Path, bases: list[InstalledBase], *, resume=False
+) -> list[str]:
     run = read_json(run_root / "run.json")
     validate_run_binding(root, run)
+    base = run_base(run, bases)
     command = [
         str(upstream_file("train.py")),
         "--config",
@@ -491,7 +531,7 @@ def run_command(root: Path, run_root: Path, resources: dict, *, resume=False) ->
         "--output-dir",
         str(run_root / "checkpoints"),
         "--init-checkpoint",
-        resources["model"],
+        str(base.checkpoint),
         "--device",
         "cuda",
     ]

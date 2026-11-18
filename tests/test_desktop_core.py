@@ -477,24 +477,19 @@ class StoreReviewTests(unittest.TestCase):
 
     def test_every_model_file_has_a_pinned_size_and_hash(self):
         from irodori_tts.desktop import asr
-        from irodori_tts.desktop.model_files import (
-            fast_model,
-            load_pins,
-            low_vram_model,
-            pinned_models,
-        )
+        from irodori_tts.desktop.base_models import CATALOG
+        from irodori_tts.desktop.model_files import load_pins, pinned_models
 
         pins = load_pins()
-        for spec in [
-            *pinned_models(),
-            low_vram_model(),
-            fast_model(),
-            *(m for b in asr.BACKENDS for m in b.models),
-        ]:
+        for spec in [*pinned_models(), *(m for b in asr.BACKENDS for m in b.models)]:
             entry = pins[spec.repo]
             self.assertEqual(entry["revision"], spec.revision, spec.repo)
             for name in spec.files:
                 self.assertRegex(entry["files"][name]["sha256"], r"^[0-9a-f]{64}$", name)
+        # Base models follow their repository's latest commit: no pin holds them back.
+        for entry in CATALOG:
+            for repo in (entry.repo, *(variant.repo for variant in entry.variants)):
+                self.assertNotIn(repo, pins)
 
     def test_large_downloads_resume_where_they_stopped_and_are_verified(self):
         import hashlib
@@ -596,7 +591,6 @@ class StoreReviewTests(unittest.TestCase):
         import zipfile
 
         from irodori_tts.desktop.exports import export_voice, import_voice
-        from irodori_tts.desktop.resources import MODEL_REPO, MODEL_REVISION
 
         root = self.root / "project"
         checkpoint = root / "runs/r1/checkpoints/checkpoint_0000010"
@@ -610,7 +604,8 @@ class StoreReviewTests(unittest.TestCase):
         run = {
             "id": "r1",
             "name": "Hana",
-            "base": {"repo": MODEL_REPO, "revision": MODEL_REVISION},
+            # A run written before runs recorded their base's architecture.
+            "base": {"repo": "Aratako/Irodori-TTS-v4.1-Small", "revision": "rev1"},
             "step": 10,
             "checkpoint": "runs/r1/checkpoints/checkpoint_0000010",
         }
@@ -621,18 +616,22 @@ class StoreReviewTests(unittest.TestCase):
         self.assertEqual(settings, {"duration_scale": 0.85})
         imported = import_voice(package, self.root / "voices")
         self.assertEqual(read_json(imported / "inference_settings.json"), {"duration_scale": 0.85})
+        # The package records the base with its architecture, so it finds its base anywhere.
+        base = read_json(imported / "voice.json")["base"]
+        self.assertEqual((base["id"], base["revision"]), ("v4.1-small", "rev1"))
+        self.assertEqual(base["architecture"]["model_dim"], 1280)
 
     @staticmethod
     def trainer_checkpoint(files: dict, folder: str, *, model: dict | None, weights=b"weights"):
         """The files of a checkpoint folder as the upstream trainer saves it, at folder."""
-        from irodori_tts.desktop.resources import MODEL_ARCHITECTURE
+        from irodori_tts.desktop.base_models import SMALL_ARCHITECTURE
 
         files[f"{folder}/adapter_config.json"] = b"{}"
         files[f"{folder}/adapter_model.safetensors"] = weights
         files[f"{folder}/trainer_state.pt"] = b"optimizer"
         files[f"{folder}/irodori_lora_metadata.json"] = b'{"base_init": {"checkpoint_path": "x"}}'
         if model is not False:
-            config = {"model": {**MODEL_ARCHITECTURE, **(model or {})}, "train": {}}
+            config = {"model": {**SMALL_ARCHITECTURE, **(model or {})}, "train": {}}
             files[f"{folder}/config.json"] = json.dumps(config).encode()
 
     def test_trainer_checkpoints_import_from_nested_folders_keeping_only_what_inference_needs(
@@ -640,8 +639,8 @@ class StoreReviewTests(unittest.TestCase):
     ):
         import zipfile
 
+        from irodori_tts.desktop.base_models import SMALL_ARCHITECTURE
         from irodori_tts.desktop.exports import import_voice, voice_candidates
-        from irodori_tts.desktop.resources import MODEL_REPO, MODEL_REVISION
 
         files = {"misuzu/README.txt": b"hello", "misuzu/samples/a.wav": b"RIFF"}
         self.trainer_checkpoint(files, "misuzu/runs/checkpoint_0001100", model=None)
@@ -669,44 +668,50 @@ class StoreReviewTests(unittest.TestCase):
         voice = read_json(imported / "voice.json")
         self.assertEqual(voice["name"], "misuzu")
         self.assertEqual(voice["step"], 1100)
-        self.assertEqual(voice["base"], {"repo": MODEL_REPO, "revision": MODEL_REVISION})
+        # Its config.json tells the shape; the commit it was trained on is not known.
+        expected = {
+            "id": "v4.1-small",
+            "name": "Irodori-TTS v4.1 Small",
+            "repo": "Aratako/Irodori-TTS-v4.1-Small",
+            "revision": None,
+            "architecture": SMALL_ARCHITECTURE,
+        }
+        self.assertEqual(voice["base"], expected)
         self.assertEqual(
-            read_json(imported / "irodori_lora_metadata.json"),
-            {"base_resource": {"repo": MODEL_REPO, "revision": MODEL_REVISION}},
+            read_json(imported / "irodori_lora_metadata.json"), {"base_resource": expected}
         )
         self.assertEqual([p.name for p in (self.root / "voices").iterdir()], [imported.name])
 
-    def test_a_package_with_several_sizes_offers_only_the_one_that_fits(self):
+    def test_a_package_with_several_sizes_offers_each_with_its_base(self):
         import zipfile
 
+        from irodori_tts.desktop.base_models import LARGE_ARCHITECTURE, match_record
         from irodori_tts.desktop.exports import import_voice, voice_candidates
         from irodori_tts.desktop.messages import BusinessError
 
         files = {}
         self.trainer_checkpoint(files, "hana/small", model=None)
-        self.trainer_checkpoint(files, "hana/large", model={"model_dim": 2048, "num_layers": 24})
-        files["hana/large/base_model.json"] = b'{"repo_id": "Aratako/Irodori-TTS-v4-Large"}'
+        self.trainer_checkpoint(files, "hana/large", model=LARGE_ARCHITECTURE)
         package = self.root / "hana.zip"
         with zipfile.ZipFile(package, "w") as archive:
             for name, data in files.items():
                 archive.writestr(name, data)
 
         found = {item["folder"]: item for item in voice_candidates(package, self.root / "v")}
-        self.assertIsNone(found["hana/small"]["problem"])
         self.assertEqual(found["hana/small"]["name"], "hana small")
-        problem = found["hana/large"]["problem"]
-        self.assertEqual(problem.key, "exports.voice_for_another_base_model")
-        self.assertIn("Irodori-TTS-v4-Large", str(problem.params["model"].value))
-
+        # A voice for a base not installed here is still kept: it names the base it needs.
+        self.assertIsNone(found["hana/small"]["problem"])
+        self.assertIsNone(found["hana/large"]["problem"])
         with self.assertRaises(BusinessError) as raised:
             import_voice(package, self.root / "v")
         self.assertEqual(raised.exception.message.key, "exports.choose_one_voice_in_package")
-        with self.assertRaises(BusinessError) as raised:
-            import_voice(package, self.root / "v", "hana/large")
-        self.assertEqual(raised.exception.message.key, "exports.voice_for_another_base_model")
-        imported = import_voice(package, self.root / "v", "hana/small")
-        self.assertEqual(read_json(imported / "voice.json")["name"], "hana small")
-        self.assertEqual([p.name for p in (self.root / "v").iterdir()], [imported.name])
+        large = import_voice(package, self.root / "v", "hana/large")
+        base = read_json(large / "voice.json")["base"]
+        self.assertEqual((base["id"], base["architecture"]), ("v4-large", LARGE_ARCHITECTURE))
+        match = match_record(base, [])
+        self.assertEqual((match.status, match.needs.id), ("missing", "v4-large"))
+        small = import_voice(package, self.root / "v", "hana/small")
+        self.assertEqual(read_json(small / "voice.json")["name"], "hana small")
 
     def test_an_adapter_without_config_is_judged_by_its_tensor_shapes(self):
         from irodori_tts.desktop.exports import import_voice
@@ -724,23 +729,62 @@ class StoreReviewTests(unittest.TestCase):
             raw = json.dumps(header).encode()
             return len(raw).to_bytes(8, "little") + raw
 
-        for width, layers, fits in ((1280, 12, True), (2048, 24, False)):
-            folder = self.root / f"checkpoint_final_{width}"
+        # Width and depth must both be a known base's; a shallower adapter is not Small's.
+        for width, layers, base in (
+            (1280, 12, "v4.1-small"),
+            (2048, 24, "v4-large"),
+            (1280, 8, None),
+            (640, 6, None),
+        ):
+            folder = self.root / f"checkpoint_final_{width}_{layers}"
             files = {}
             self.trainer_checkpoint(files, ".", model=False, weights=safetensors(width, layers))
             for name, data in files.items():
                 (folder / name).parent.mkdir(parents=True, exist_ok=True)
                 (folder / name).write_bytes(data)
-            # Choosing the adapter_config.json in the dialog takes its folder.
-            if fits:
-                imported = import_voice(folder / "adapter_config.json", self.root / "voices")
-                self.assertTrue((imported / "adapter_model.safetensors").is_file())
-            else:
-                with self.assertRaises(BusinessError) as raised:
-                    import_voice(folder, self.root / "voices")
-                self.assertEqual(
-                    raised.exception.message.key, "exports.voice_for_another_base_model"
-                )
+            with self.subTest(width=width, layers=layers):
+                if base:
+                    # Choosing the adapter_config.json in the dialog takes its folder.
+                    imported = import_voice(folder / "adapter_config.json", self.root / "voices")
+                    self.assertTrue((imported / "adapter_model.safetensors").is_file())
+                    self.assertEqual(read_json(imported / "voice.json")["base"]["id"], base)
+                else:
+                    with self.assertRaises(BusinessError) as raised:
+                        import_voice(folder, self.root / "voices")
+                    self.assertEqual(
+                        raised.exception.message.key, "exports.voice_base_model_unknown"
+                    )
+
+    def test_an_imported_base_identifies_an_adapter_of_its_own_shape(self):
+        from irodori_tts.desktop.base_models import SMALL_ARCHITECTURE, InstalledBase
+        from irodori_tts.desktop.exports import import_voice
+
+        def safetensors(width, layers):
+            header = {
+                f"blocks.{i}.attention.wq.lora_A.weight": {
+                    "dtype": "F32",
+                    "shape": [16, width],
+                    "data_offsets": [0, 0],
+                }
+                for i in range(layers)
+            }
+            raw = json.dumps(header).encode()
+            return len(raw).to_bytes(8, "little") + raw
+
+        shape = {**SMALL_ARCHITECTURE, "model_dim": 640, "num_layers": 6}
+        mine = InstalledBase(
+            "imported-aaaaaaaaaaaa", "Mine", "imported", None, None, Path("m"), shape
+        )
+        folder = self.root / "checkpoint_final"
+        files = {}
+        self.trainer_checkpoint(files, ".", model=False, weights=safetensors(640, 6))
+        for name, data in files.items():
+            (folder / name).parent.mkdir(parents=True, exist_ok=True)
+            (folder / name).write_bytes(data)
+        imported = import_voice(folder, self.root / "voices", bases=[mine])
+        base = read_json(imported / "voice.json")["base"]
+        self.assertEqual(base["architecture"], shape)
+        self.assertIsNone(base["id"])
 
     def test_voice_packages_in_7z_and_rar_form_are_read_through_7zip(self):
         import subprocess
@@ -800,7 +844,8 @@ class StoreReviewTests(unittest.TestCase):
             patch.object(model_files, "downloads", return_value=[item]),
             patch.dict(os.environ, {"HF_HOME": str(self.root / "hf")}),
         ):
-            result = model_files.import_model_files(source)
+            resources = self.root / "resources"
+            result = model_files.import_model_files(source, resources)
             self.assertEqual(
                 sorted(result["imported"]),
                 ["org/voice/model.safetensors", "org/voice/sub/config.json"],
@@ -809,21 +854,21 @@ class StoreReviewTests(unittest.TestCase):
             placed = model_files.snapshot_path("org/voice", "rev1", "sub/config.json")
             self.assertEqual(placed.read_bytes(), config)
             # Importing again finds everything in place.
-            again = model_files.import_model_files(source)
+            again = model_files.import_model_files(source, resources)
             self.assertEqual((again["imported"], len(again["present"])), ([], 2))
             # An export imports into another computer's empty cache.
             package = self.root / "models.zip"
-            model_files.export_model_files(["voice"], package)
+            model_files.export_model_files(["voice"], package, resources)
             with zipfile.ZipFile(package) as archive:
                 self.assertIn(model_files.MANIFEST, archive.namelist())
             os.environ["HF_HOME"] = str(self.root / "other")
-            moved = model_files.import_model_files(package)
+            moved = model_files.import_model_files(package, resources)
             self.assertEqual(len(moved["imported"]), 2)
             self.assertEqual(moved["complete"], ["voice"])
             # The same name and size with other content is refused, and leaves nothing behind.
             os.environ["HF_HOME"] = str(self.root / "third")
             (source / "deep/model.safetensors").write_bytes(b"x" * 5000)
-            refused = model_files.import_model_files(source)
+            refused = model_files.import_model_files(source, resources)
             self.assertEqual(
                 [name for name, _ in refused["rejected"]], [str(Path("deep/model.safetensors"))]
             )
@@ -834,7 +879,7 @@ class StoreReviewTests(unittest.TestCase):
             stray = self.root / "notes.txt"
             stray.write_text("not models", encoding="utf-8")
             with self.assertRaises(BusinessError):
-                model_files.import_model_files(stray)
+                model_files.import_model_files(stray, resources)
 
     def test_model_files_import_reads_a_7z_in_one_pass(self):
         import hashlib
@@ -878,13 +923,274 @@ class StoreReviewTests(unittest.TestCase):
             present = model_files.snapshot_path("org/voice", "rev1", "sub/config.json")
             present.parent.mkdir(parents=True)
             present.write_bytes(config)
-            result = model_files.import_model_files(archive)
+            result = model_files.import_model_files(archive, self.root / "resources")
             self.assertEqual(result["imported"], ["org/voice/model.safetensors"])
             self.assertEqual(len(result["present"]), 1)
             self.assertEqual(result["complete"], ["voice"])
             placed = model_files.snapshot_path("org/voice", "rev1", "model.safetensors")
             self.assertEqual(placed.read_bytes(), weights)
             self.assertEqual(list((self.root / "hf/hub").glob(".import-*")), [])
+
+    def test_model_packs_carry_base_models_checked_against_their_own_record(self):
+        import zipfile
+
+        from irodori_tts.desktop import model_files
+        from irodori_tts.desktop.base_models import (
+            SMALL_ARCHITECTURE,
+            InstalledBase,
+            load_registry,
+            save_base,
+        )
+        from tests.test_base_models import write_checkpoint, write_tokenizer
+
+        hub = self.root / "hf"
+        snapshot = hub / "hub/models--Aratako--Irodori-TTS-v4.1-Small/snapshots/c1"
+        write_checkpoint(snapshot / "model.safetensors", SMALL_ARCHITECTURE)
+        write_tokenizer(snapshot / "tokenizer")
+        quantized = hub / "hub/models--Aratako--Irodori-TTS-v4.1-Small-Quantized/snapshots/q1"
+        write_checkpoint(quantized / "int8-weight-only/model.safetensors", SMALL_ARCHITECTURE)
+        write_tokenizer(quantized / "tokenizer")
+        mine = self.root / "resources/bases/imported-aaaaaaaaaaaa"
+        write_checkpoint(mine / "model.safetensors", SMALL_ARCHITECTURE, salt=1.0)
+        write_tokenizer(mine / "tokenizer", with_json=False)
+        resources, other = self.root / "resources", self.root / "other-resources"
+        with (
+            patch.object(model_files, "pinned_models", return_value=[]),
+            patch.dict(os.environ, {"HF_HOME": str(hub)}),
+        ):
+            save_base(
+                resources,
+                InstalledBase(
+                    "v4.1-small",
+                    "Irodori-TTS v4.1 Small",
+                    "catalog",
+                    "Aratako/Irodori-TTS-v4.1-Small",
+                    "c1",
+                    snapshot / "model.safetensors",
+                    dict(SMALL_ARCHITECTURE),
+                    {"low_vram": quantized / "int8-weight-only/model.safetensors"},
+                ),
+            )
+            save_base(
+                resources,
+                InstalledBase(
+                    "imported-aaaaaaaaaaaa",
+                    "Mine",
+                    "imported",
+                    None,
+                    None,
+                    mine / "model.safetensors",
+                    dict(SMALL_ARCHITECTURE),
+                ),
+            )
+            package = self.root / "models.zip"
+            keys = [
+                model_files.SPEECH,
+                model_files.variant_key("v4.1-small", "low_vram"),
+                "imported:imported-aaaaaaaaaaaa",
+            ]
+            model_files.export_model_files(keys, package, resources)
+            with zipfile.ZipFile(package) as archive:
+                manifest = json.loads(archive.read(model_files.MANIFEST))
+                names = archive.namelist()
+            record = manifest["bases"]["v4.1-small"]
+            self.assertEqual(record["revision"], "c1")
+            self.assertIn("int8-weight-only/model.safetensors", record["variants"]["low_vram"])
+            self.assertIn("bases/imported-aaaaaaaaaaaa/tokenizer/tokenizer_config.json", names)
+            for info in record["files"].values():
+                self.assertRegex(info["sha256"], r"^[0-9a-f]{64}$")
+
+            # Another computer: an empty cache and no bases.
+            os.environ["HF_HOME"] = str(self.root / "hf2")
+            result = model_files.import_model_files(package, other)
+            self.assertEqual(result["rejected"], [])
+            bases = {base.id: base for base in load_registry(other)}
+            self.assertEqual(set(bases), {"v4.1-small", "imported-aaaaaaaaaaaa"})
+            self.assertEqual(bases["v4.1-small"].revision, "c1")
+            self.assertEqual(set(bases["v4.1-small"].variants), {"low_vram"})
+            self.assertEqual(bases["imported-aaaaaaaaaaaa"].source, "imported")
+            self.assertTrue(
+                (other / "bases/imported-aaaaaaaaaaaa/tokenizer/tokenizer_config.json").is_file()
+            )
+            self.assertIn(model_files.SPEECH, result["complete"])
+
+            # A pack whose file differs from its own record is refused for that file.
+            damaged = self.root / "damaged.zip"
+            with zipfile.ZipFile(package) as source, zipfile.ZipFile(damaged, "w") as out:
+                for info in source.infolist():
+                    data = source.read(info)
+                    if info.filename.endswith("imported-aaaaaaaaaaaa/model.safetensors"):
+                        data = bytes(len(data))
+                    out.writestr(info, data)
+            third = self.root / "third-resources"
+            os.environ["HF_HOME"] = str(self.root / "hf3")
+            refused = model_files.import_model_files(damaged, third)
+            self.assertEqual(len(refused["rejected"]), 1)
+            self.assertNotIn("imported-aaaaaaaaaaaa", {b.id for b in load_registry(third)})
+
+    def fake_hub_base(self, hub, repo, revision, architecture, files=("tokenizer",)):
+        """A catalog base's snapshot in the download cache: header-only model and tokenizer."""
+        from tests.test_base_models import write_checkpoint, write_tokenizer
+
+        snapshot = hub / "hub" / ("models--" + repo.replace("/", "--")) / "snapshots" / revision
+        write_checkpoint(snapshot / "model.safetensors", architecture)
+        write_tokenizer(snapshot / "tokenizer")
+        (snapshot / "NOTICE").write_text("notice", encoding="utf-8")
+        return snapshot
+
+    def test_a_pack_with_only_another_base_carries_the_shared_files(self):
+        import zipfile
+
+        from irodori_tts.desktop import model_files
+        from irodori_tts.desktop.base_models import LARGE_ARCHITECTURE, InstalledBase, save_base
+        from irodori_tts.desktop.resources import ModelSpec
+
+        hub, resources = self.root / "hf", self.root / "resources"
+        codec = hub / "hub/models--org--codec/snapshots/r1/weights.pth"
+        codec.parent.mkdir(parents=True)
+        codec.write_bytes(b"codec")
+        shared = ModelSpec("org/codec", "r1", ("weights.pth",), 5)
+        with (
+            patch.object(model_files, "pinned_models", return_value=[shared]),
+            patch.object(model_files, "load_pins", return_value={}),
+            patch.dict(os.environ, {"HF_HOME": str(hub)}),
+        ):
+            snapshot = self.fake_hub_base(
+                hub, "Aratako/Irodori-TTS-v4-Large", "l1", LARGE_ARCHITECTURE
+            )
+            save_base(
+                resources,
+                InstalledBase(
+                    "v4-large",
+                    "Irodori-TTS v4 Large",
+                    "catalog",
+                    "Aratako/Irodori-TTS-v4-Large",
+                    "l1",
+                    snapshot / "model.safetensors",
+                    dict(LARGE_ARCHITECTURE),
+                ),
+            )
+            package = self.root / "large.zip"
+            model_files.export_model_files([model_files.base_key("v4-large")], package, resources)
+            with zipfile.ZipFile(package) as archive:
+                names = archive.namelist()
+                manifest = json.loads(archive.read(model_files.MANIFEST))
+            self.assertIn("models--org--codec/snapshots/r1/weights.pth", names)
+            self.assertIn("org/codec", manifest["models"])
+            self.assertIn("v4-large", manifest["bases"])
+
+    def test_a_pack_leaves_an_installed_base_as_it_is(self):
+        import zipfile
+
+        from irodori_tts.desktop import model_files
+        from irodori_tts.desktop.base_models import (
+            SMALL_ARCHITECTURE,
+            InstalledBase,
+            load_registry,
+            save_base,
+        )
+
+        hub, source, target = self.root / "hf", self.root / "source-res", self.root / "target-res"
+        with (
+            patch.object(model_files, "pinned_models", return_value=[]),
+            patch.dict(os.environ, {"HF_HOME": str(hub)}),
+        ):
+            old = self.fake_hub_base(
+                hub, "Aratako/Irodori-TTS-v4.1-Small", "old", SMALL_ARCHITECTURE
+            )
+            new = self.fake_hub_base(
+                hub, "Aratako/Irodori-TTS-v4.1-Small", "new", SMALL_ARCHITECTURE
+            )
+            for root, revision, folder in ((source, "old", old), (target, "new", new)):
+                save_base(
+                    root,
+                    InstalledBase(
+                        "v4.1-small",
+                        "Irodori-TTS v4.1 Small",
+                        "catalog",
+                        "Aratako/Irodori-TTS-v4.1-Small",
+                        revision,
+                        folder / "model.safetensors",
+                        dict(SMALL_ARCHITECTURE),
+                    ),
+                )
+            package = self.root / "old.zip"
+            model_files.export_model_files([model_files.SPEECH], package, source)
+            shutil.rmtree(old)
+            result = model_files.import_model_files(package, target)
+            (base,) = load_registry(target)
+            self.assertEqual(base.revision, "new")
+            self.assertEqual(result["kept"], ["v4.1-small"])
+            self.assertEqual(result["imported"], [])
+            self.assertFalse(old.exists())
+            with zipfile.ZipFile(package) as archive:
+                self.assertIn("v4.1-small", json.loads(archive.read(model_files.MANIFEST))["bases"])
+
+    def test_imported_bases_survive_a_moved_data_folder(self):
+        from irodori_tts.desktop.base_models import import_base, load_registry
+        from tests.test_base_models import SMALL, write_checkpoint, write_tokenizer
+
+        source = self.root / "mine"
+        write_checkpoint(source / "model.safetensors", SMALL)
+        write_tokenizer(source / "tokenizer")
+        before = self.root / "data/resources"
+        base = import_base(source, before)
+        registry = json.loads((before / "base-models.json").read_text(encoding="utf-8"))
+        self.assertFalse(Path(registry["bases"][base.id]["checkpoint"]).is_absolute())
+        moved = self.root / "elsewhere/data"
+        moved.parent.mkdir()
+        shutil.move(str(self.root / "data"), str(moved))
+        (found,) = load_registry(moved / "resources")
+        self.assertEqual(found.id, base.id)
+        self.assertEqual(
+            found.checkpoint, moved / "resources/bases" / base.id / "model.safetensors"
+        )
+        self.assertTrue(found.checkpoint.is_file())
+
+    def test_a_task_checks_only_its_own_base_and_hashes_nothing(self):
+        from irodori_tts.desktop import resources
+        from irodori_tts.desktop.base_models import (
+            LARGE_ARCHITECTURE,
+            SMALL_ARCHITECTURE,
+            InstalledBase,
+            save_base,
+        )
+
+        hub, root = self.root / "hf", self.root / "resources"
+        small_rev, large_rev = "a" * 40, "b" * 40
+        with (
+            patch.dict(os.environ, {"HF_HOME": str(hub)}),
+            patch.object(resources, "RESOURCE_SPEC", {}),
+            patch.object(resources, "pin_watermark_revision"),
+            patch.object(resources, "digest", side_effect=AssertionError("hashed")),
+        ):
+            for base_id, repo, revision, shape in (
+                ("v4.1-small", "Aratako/Irodori-TTS-v4.1-Small", small_rev, SMALL_ARCHITECTURE),
+                ("v4-large", "Aratako/Irodori-TTS-v4-Large", large_rev, LARGE_ARCHITECTURE),
+            ):
+                snapshot = self.fake_hub_base(hub, repo, revision, shape)
+                save_base(
+                    root,
+                    InstalledBase(
+                        base_id,
+                        base_id,
+                        "catalog",
+                        repo,
+                        revision,
+                        snapshot / "model.safetensors",
+                        dict(shape),
+                    ),
+                )
+            # Large is damaged: a file of its commit is gone.
+            large = hub / "hub/models--Aratako--Irodori-TTS-v4-Large/snapshots" / large_rev
+            (large / "tokenizer/tokenizer.json").unlink()
+            result = resources.resolve_resources(root, bases=["v4.1-small"])
+            self.assertEqual(set(result["bases"]), {"v4.1-small"})
+            manifest = read_json(root / "resource-manifest.json")
+            self.assertIsNone(manifest["files"]["base/v4.1-small/model.safetensors"]["sha256"])
+            # Checking everything (the resources task) does find the damage.
+            with self.assertRaises(BusinessError):
+                resources.resolve_resources(root)
 
     def test_package_data_lives_beside_the_launcher(self):
         from irodori_tts.desktop import app
@@ -944,7 +1250,7 @@ class StoreReviewTests(unittest.TestCase):
             patch.object(model_files, "downloads", return_value=items),
             patch.dict(os.environ, {"HF_HOME": str(self.root / "hf")}),
         ):
-            result = model_files.import_model_files(source)
+            result = model_files.import_model_files(source, self.root / "resources")
             self.assertEqual(result["complete"], ["a", "b"])
             for repo, revision in (("org/a", "ra"), ("org/b", "rb")):
                 placed = model_files.snapshot_path(repo, revision, "vocab.json")
@@ -1564,8 +1870,30 @@ class FakeRuntime:
         )
 
 
+def base_resources(**variants):
+    """resolve_resources' answer with the default catalog base installed at checkpoint
+    "model", and the given variants (key -> checkpoint)."""
+    from irodori_tts.desktop.base_models import SMALL_ARCHITECTURE
+
+    return {
+        "codec": "codec",
+        "bases": {
+            "v4.1-small": {
+                "id": "v4.1-small",
+                "name": "Irodori-TTS v4.1 Small",
+                "source": "catalog",
+                "repo": "Aratako/Irodori-TTS-v4.1-Small",
+                "revision": "rev1",
+                "architecture": dict(SMALL_ARCHITECTURE),
+                "checkpoint": "model",
+                "variants": variants,
+            }
+        },
+    }
+
+
 class GenerationWorkerTests(unittest.TestCase):
-    def run_task(self, **payload):
+    def run_task(self, resources=None, **payload):
         from irodori_tts.desktop import worker
 
         root = Path(tempfile.mkdtemp())
@@ -1574,12 +1902,15 @@ class GenerationWorkerTests(unittest.TestCase):
             "kind": "generate",
             "request": {"text": "こんにちは。", "num_steps": 4, **payload.pop("request", {})},
             "output": str(root / "generations" / "g1"),
+            "base": "v4.1-small",
             **payload,
         }
         channel = payload.pop("channel", None) or FakeChannel()
         runtime = payload.pop("runtime", None) or FakeRuntime()
         with patch.object(worker, "runtime_sources", return_value={}):
-            _runtime, record = worker.synthesize(payload, channel, {"model": "model"}, runtime)
+            _runtime, record = worker.synthesize(
+                payload, channel, resources or base_resources(), runtime
+            )
         return Path(payload["output"]), record, runtime, channel
 
     def test_candidates_are_separate_files_in_one_record(self):
@@ -1612,15 +1943,14 @@ class GenerationWorkerTests(unittest.TestCase):
             "checkpoint_snapshot": str(checkpoint),
             "request": {"text": "a", "num_steps": 2, "num_candidates": 3},
             "output": str(root / "preview"),
+            "base": "v4.1-small",
         }
         runtime = FakeRuntime()
         with (
             patch.object(worker, "runtime_sources", return_value={}),
             patch.object(worker, "complete_checkpoint", return_value=True),
         ):
-            _runtime, record = worker.synthesize(
-                payload, FakeChannel(), {"model": "model"}, runtime
-            )
+            _runtime, record = worker.synthesize(payload, FakeChannel(), base_resources(), runtime)
         self.assertEqual(runtime.requests[0].num_candidates, 1)
         self.assertNotIn("candidates", record)
 
@@ -1668,11 +1998,71 @@ class GenerationWorkerTests(unittest.TestCase):
     def test_the_low_vram_model_reads_one_segment_per_pass(self):
         from irodori_tts.desktop import model_files
 
-        runtime = FakeRuntime(model_files.low_vram_checkpoint())
+        runtime = FakeRuntime("low")
         self.run_task(
-            request={"text": ("あ" * 99 + "。") * 3}, model=model_files.LOW_VRAM, runtime=runtime
+            base_resources(low_vram="low"),
+            request={"text": ("あ" * 99 + "。") * 3},
+            model=model_files.LOW_VRAM,
+            runtime=runtime,
         )
         self.assertEqual(runtime.batches, [1, 1, 1])
+
+    def test_the_record_names_the_base_it_was_generated_on(self):
+        _output, record, _runtime, _ = self.run_task()
+        self.assertEqual(record["base"]["id"], "v4.1-small")
+        self.assertEqual(record["base"]["revision"], "rev1")
+        self.assertEqual(record["base"]["architecture"]["model_dim"], 1280)
+        self.assertNotIn("checkpoint", record["base"])
+        self.assertNotIn("base_revision", record)
+
+    def test_a_variant_the_base_lacks_falls_back_to_its_standard_model(self):
+        from irodori_tts.desktop import model_files
+
+        runtime = FakeRuntime("model")
+        _output, record, used, _ = self.run_task(
+            base_resources(low_vram="low"), model=model_files.FAST, runtime=runtime
+        )
+        self.assertIs(used, runtime)
+        self.assertFalse(runtime.unloaded)
+        self.assertIsNone(record["model"])
+
+    def test_an_adapter_for_another_architecture_is_refused_before_loading(self):
+        from irodori_tts.desktop.base_models import LARGE_ARCHITECTURE, SMALL_ARCHITECTURE
+        from tests.test_base_models import write_checkpoint
+
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, True)
+        checkpoint = write_checkpoint(root / "small.safetensors", SMALL_ARCHITECTURE)
+        quantized = write_checkpoint(root / "small-int8.safetensors", SMALL_ARCHITECTURE)
+        adapter = root / "voice"
+        adapter.mkdir()
+        write_json(adapter / "config.json", {"model": LARGE_ARCHITECTURE, "train": {}})
+        resources = base_resources(low_vram=str(quantized))
+        resources["bases"]["v4.1-small"]["checkpoint"] = str(checkpoint)
+        for model in (None, "low_vram"):
+            with self.subTest(model=model):
+                runtime = FakeRuntime(str(checkpoint))
+                with self.assertRaises(BusinessError) as raised:
+                    self.run_task(
+                        resources,
+                        model=model,
+                        request={"lora_adapter": str(adapter)},
+                        runtime=runtime,
+                    )
+                self.assertEqual(raised.exception.message.key, "worker.adapter_for_another_base")
+                self.assertEqual(runtime.requests, [])
+        # The adapter of the checkpoint's own shape generates.
+        write_json(adapter / "config.json", {"model": SMALL_ARCHITECTURE, "train": {}})
+        _output, record, _runtime, _ = self.run_task(
+            resources, request={"lora_adapter": str(adapter)}, runtime=FakeRuntime(str(checkpoint))
+        )
+        self.assertEqual(record["base"]["id"], "v4.1-small")
+
+    def test_a_base_that_is_not_installed_is_refused_before_loading(self):
+        runtime = FakeRuntime()
+        with self.assertRaises(BusinessError):
+            self.run_task(base="v4-large", runtime=runtime)
+        self.assertEqual(runtime.requests, [])
 
     def test_a_pass_out_of_video_memory_is_repeated_one_segment_at_a_time(self):
         runtime = FakeRuntime()
@@ -1728,16 +2118,17 @@ class LowVramTests(unittest.TestCase):
 
         root = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, root, True)
-        loaded = FakeRuntime(model_files.low_vram_checkpoint())
+        loaded = FakeRuntime("low")
         old = FakeRuntime()
         payload = {
             "kind": "generate",
             "model": model_files.LOW_VRAM,
+            "base": "v4.1-small",
             "output": str(root / "out"),
             "request": {"text": "こんにちは", "num_steps": 1, "seed": 1},
         }
         channel = MagicMock(stopped=lambda: False)
-        resources = {"model": "model", "codec": "codec"}
+        resources = base_resources(low_vram="low")
         with (
             patch(
                 "irodori_tts.inference_runtime.InferenceRuntime.from_key", return_value=loaded
@@ -1750,7 +2141,7 @@ class LowVramTests(unittest.TestCase):
             runtime, _ = worker.synthesize(payload, channel, resources, old)
             self.assertIs(runtime, loaded)
             self.assertTrue(old.unloaded)
-            self.assertEqual(load.call_args.args[0].checkpoint, model_files.low_vram_checkpoint())
+            self.assertEqual(load.call_args.args[0].checkpoint, "low")
             # The same choice keeps the loaded model.
             again, _ = worker.synthesize(payload, channel, resources, runtime)
             self.assertIs(again, loaded)
@@ -1761,13 +2152,18 @@ class LowVramTests(unittest.TestCase):
 
         broken = FakeRuntime()
         broken.watermarker.ready = False
-        payload = {"kind": "generate", "output": "unused", "request": {"text": "a"}}
+        payload = {
+            "kind": "generate",
+            "output": "unused",
+            "base": "v4.1-small",
+            "request": {"text": "a"},
+        }
         with (
             patch("irodori_tts.inference_runtime.InferenceRuntime.from_key", return_value=broken),
             patch("torch.cuda.is_bf16_supported", return_value=True),
             self.assertRaises(BusinessError),
         ):
-            worker.synthesize(payload, MagicMock(), {"model": "m", "codec": "c"}, None)
+            worker.synthesize(payload, MagicMock(), base_resources(), None)
         self.assertTrue(broken.unloaded)
 
 
@@ -1788,3 +2184,25 @@ if __name__ == "__main__":
     from tests.run import guarded_main
 
     raise SystemExit(guarded_main(lambda: unittest.main()))
+
+
+class StoredPathTests(unittest.TestCase):
+    def test_a_snapshot_link_is_stored_by_its_own_path_not_its_blob(self):
+        from irodori_tts.desktop.resources import manifest_file, stored_path
+
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        cache = Path(temporary.name) / "hf"
+        blob = cache / "hub/models--org--name/blobs/0123abcd"
+        snapshot = cache / "hub/models--org--name/snapshots/rev/model.safetensors"
+        blob.parent.mkdir(parents=True)
+        snapshot.parent.mkdir(parents=True)
+        blob.write_bytes(b"weights")
+        try:
+            snapshot.symlink_to(blob)
+        except OSError:
+            self.skipTest("symbolic links are not available")
+        with patch.dict(os.environ, {"HF_HOME": str(cache)}):
+            stored = stored_path(snapshot)
+            self.assertEqual(stored, "hub/models--org--name/snapshots/rev/model.safetensors")
+            self.assertEqual(manifest_file(stored), snapshot)

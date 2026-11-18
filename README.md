@@ -7,8 +7,10 @@ and QFluentWidgets on a pinned [Irodori-TTS](https://github.com/Aratako/Irodori-
 
 ## Features
 
-- Generate speech with the base model or a trained voice, from a voice description and
+- Generate speech with a base model or a trained voice, from a voice description and
   reference recordings. Each model remembers the settings last used with it.
+- Use several base models side by side: Irodori-TTS v4.1 Small, v4 Large, and base models
+  imported from disk. A voice runs on the installed base it was trained for.
 - Read long text in segments, and insert the model's emoji style tags from a palette.
 - Generate with less video memory, or faster with a 4-step model.
 - Import recordings without transcripts: one model writes them, a second one cross-checks
@@ -21,8 +23,8 @@ and QFluentWidgets on a pinned [Irodori-TTS](https://github.com/Aratako/Irodori-
 ## Requirements
 
 Windows x64 with an NVIDIA GPU and a current driver. Speech input is Japanese.
-Plan disk space for the models (about 3 GB, plus 2–5 GB per transcription model) and for
-training checkpoints.
+Plan disk space for the models (about 3.5 GB for v4.1 Small, 13 GB more for v4 Large, plus
+2–5 GB per transcription model) and for training checkpoints.
 
 ## Run the package
 
@@ -40,13 +42,13 @@ uv sync --python 3.10 --extra cu128
 ```
 
 The first start opens **Getting started**, which checks the computer and downloads the
-speech model and the recommended transcription models; a stopped download continues where
+v4.1 Small base model and the recommended transcription models; a stopped download continues where
 it ended. Without network access, use **Import model files** with a model package (.zip or
 .7z) or a folder of model files, for example one exported on another computer
 (**Settings → Export downloaded models**). Every file is checked before it is used. A short tour shows where things are;
 **Settings → Start the tour again** repeats it.
 
-1. Try the base model on **Generate**.
+1. Try the default voice on **Generate**.
 2. On **Models**, create a **New model** and **Import recordings**; transcripts are written
    automatically. Recordings with CSV or TXT transcripts can be imported as well.
 3. Check the recordings marked **Needs review**.
@@ -57,14 +59,35 @@ it ended. Without network access, use **Import model files** with a model packag
 
 Use recordings you have the right to use. The included examples are synthetic.
 
-**Settings → Generation model** chooses the model used for generating, once it is downloaded
-in **Getting started**:
+### Base models
 
-- **Less video memory** (about 0.9 GB): about a quarter less video memory.
-- **Fast (4 steps)** (about 3.1 GB): 4 sampling steps instead of 40; the model sets its own
-  steps and guidance.
+A base model is identified by its architecture, the model shape its checkpoint records. A
+trained voice runs on any installed base of the architecture it was trained on, so a newer
+version of a base keeps every voice working; Generate notes when a voice was trained on
+another version. A voice whose base is not installed names the base to download, or asks for
+the base it was trained on to be imported.
 
-Trained voices work with both; training keeps using the speech model.
+- **Irodori-TTS v4.1 Small** (about 3.5 GB): the default, downloaded in **Getting started**.
+- **Irodori-TTS v4 Large** (about 13 GB): optional; slower and needs much more video memory
+  (training needs a 16 GB card or more). It is used under the
+  [Gemma terms of use](https://huggingface.co/Aratako/Irodori-TTS-v4-Large/blob/main/GEMMA_TERMS_OF_USE.md).
+- **Settings → Import base model** adds a base from a folder or a `.safetensors` file whose
+  `tokenizer/` folder sits beside it; quantized checkpoints are accepted.
+
+The catalog bases follow the latest commit of their Hugging Face repository; **Settings**
+offers an update when a newer one is published. With two or more bases installed, Generate
+lets the default voice choose its base; a new training run chooses the base it trains on and
+keeps it.
+
+**Settings → Generation model** chooses a variant for generating, for the bases whose variant
+is downloaded in **Getting started**; the others use their standard model:
+
+- **Less video memory** (Small about 0.9 GB, Large about 3.9 GB): about a quarter less video
+  memory.
+- **Fast (4 steps)** (Small only, about 3.1 GB): 4 sampling steps instead of 40; the model sets
+  its own steps and guidance.
+
+Trained voices work with their base's variants; training uses the base's standard model.
 
 ### Transcription models
 

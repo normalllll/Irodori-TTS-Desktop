@@ -1,5 +1,6 @@
-"""Write irodori_tts/desktop/model_pins.json: the size and SHA-256 of every file of every model
-the application downloads, at its pinned revision.
+"""Write irodori_tts/desktop/model_pins.json: the size and SHA-256 of every file of every pinned
+model the application downloads (codec, watermark, transcription), at its pinned revision.
+Base speech models are not pinned: they follow their repository's latest commit.
 
 Imported model files (from another user's copy) are accepted only when they match these values.
 The files are hashed from the local download cache; large files are also checked against the
@@ -26,8 +27,6 @@ configure_environment(REPO)
 from irodori_tts.desktop import asr  # noqa: E402
 from irodori_tts.desktop.model_files import (  # noqa: E402
     PINS_PATH,
-    fast_model,
-    low_vram_model,
     pinned_models,
 )
 from irodori_tts.desktop.resources import ModelSpec, cached_snapshot  # noqa: E402
@@ -60,8 +59,6 @@ def pin(spec: ModelSpec, *, online: bool) -> dict:
 def build(*, online: bool) -> dict:
     specs = [
         *pinned_models(),
-        low_vram_model(),
-        fast_model(),
         *(model for backend in asr.BACKENDS for model in backend.models),
     ]
     repos = {}

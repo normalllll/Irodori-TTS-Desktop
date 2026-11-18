@@ -15,7 +15,7 @@ from qfluentwidgets import FluentIcon, ProgressBar
 
 from irodori_tts.desktop.messages import BusinessError, fmt, t
 
-from . import asr, model_files
+from . import asr, base_models, model_files
 from .asr_dialog import human_size
 from .connection import check_hugging_face
 from .i18n import bind, set_text
@@ -59,6 +59,8 @@ class CheckRow(QWidget):
         self.title = elided_label(title, emphasis=True)
         self.value = label("", "muted", wrap=False)
         self.detail = label("", "muted")
+        # A model's terms of use are linked from its line.
+        self.detail.setOpenExternalLinks(True)
         self.problem = label("", "error")
         self.problem.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.problem.hide()
@@ -206,6 +208,12 @@ class GuidePage(QWidget):
         self.progress_box.hide()
         body.addWidget(self.progress_box)
 
+    def downloads(self):
+        return model_files.downloads(self.host.resource_root)
+
+    def download_for(self, key):
+        return model_files.download_for(key, self.host.resource_root)
+
     def guide_task(self):
         task = self.host.tasks.current
         return task if task and self.host.tasks.busy and task["kind"] in GUIDE_TASKS else None
@@ -251,7 +259,7 @@ class GuidePage(QWidget):
         )
         set_text(self.summary_title, title)
         set_text(self.summary_text, text)
-        ready = not missing and model_files.speech_ready()
+        ready = not missing and model_files.speech_ready(self.host.resource_root)
         self.pause_button.setVisible(task is not None and task["kind"] in {"resources", "models"})
         self.download_button.setVisible(task is None)
         self.download_button.setEnabled(not busy and (bool(missing) or ready))
@@ -283,7 +291,7 @@ class GuidePage(QWidget):
         missing, _blocking = self.todo()
         if missing:
             self.download()
-        elif model_files.speech_ready():
+        elif model_files.speech_ready(self.host.resource_root):
             self.host.new_project()
 
     def speed_text(self, task):
@@ -407,7 +415,7 @@ class GuidePage(QWidget):
         for tier, title in TIERS:
             body.addSpacing(6)
             body.addWidget(label(title, "muted", wrap=False))
-            for item in model_files.downloads():
+            for item in self.downloads():
                 if item.tier == tier:
                     check = CheckRow(item.title, progress=True)
                     self.rows[item.key] = check
@@ -421,7 +429,7 @@ class GuidePage(QWidget):
         """Recommended transcription models (and the configured defaults) that fit the card.
         When one does not fit, the most accurate ones that do take its place, two at most."""
         main, check = asr.choice(self.host.store.settings)
-        items = [i for i in model_files.downloads() if i.backend]
+        items = [i for i in self.downloads() if i.backend]
         wanted = [i for i in items if i.tier == "recommended" or i.key in {main, check}]
         chosen = [i.key for i in wanted if model_files.fits(i, self.memory)]
         for item in items:
@@ -438,20 +446,23 @@ class GuidePage(QWidget):
 
     def chosen(self):
         """What the main button downloads: the required models and the recommended ones that
-        fit the card, if they are not downloaded yet."""
+        fit the card, if they are not downloaded yet. Another base installed already stands in
+        for the default base."""
         wanted = self.recommended()
+        speech = model_files.speech_ready(self.host.resource_root)
         return [
             item
-            for item in model_files.downloads()
-            if not item.installed() and (item.tier == "required" or item.key in wanted)
+            for item in self.downloads()
+            if not item.installed()
+            and ((item.tier == "required" and not speech) or item.key in wanted)
         ]
 
     def refresh_models(self):
         task = self.guide_task()
         busy = self.host.tasks.busy
-        for item in model_files.downloads():
+        for item in self.downloads():
             self.refresh_model(item, task, busy)
-        transcription = [i for i in model_files.downloads() if i.backend and i.installed()]
+        transcription = [i for i in self.downloads() if i.backend and i.installed()]
         self.no_transcription.setVisible(not transcription)
 
     def refresh_model(self, item, task, busy, installed=None):
@@ -507,9 +518,7 @@ class GuidePage(QWidget):
         """When the default transcription models are not downloaded, the downloaded ones take
         their place: the most accurate one writes, the next one checks."""
         installed = [
-            backend.key
-            for backend in asr.BACKENDS
-            if model_files.download_for(backend.key).installed()
+            backend.key for backend in asr.BACKENDS if self.download_for(backend.key).installed()
         ]
         main, check = asr.choice(self.host.store.settings)
         if not installed or (main in installed and (check == asr.NO_CHECK or check in installed)):
@@ -529,7 +538,7 @@ class GuidePage(QWidget):
         if keys is None:
             items = self.chosen()
         else:
-            items = [model_files.download_for(key) for key in keys]
+            items = [self.download_for(key) for key in keys]
             items = [item for item in items if not item.installed()]
         if not items:
             return
@@ -540,11 +549,24 @@ class GuidePage(QWidget):
         backends = [asr.backend_for(item.backend) for item in items if item.backend]
         payload = None
         keys = [b.key for b in backends]
-        keys += [item.key for item in items if item.key in model_files.GENERATION_MODELS]
+        keys += [item.key for item in items if item.variant]
         if keys:
             payload = {"kind": "models", "backends": keys}
-        if any(item.key == model_files.SPEECH for item in items):
-            payload = {"kind": "resources", **({"then": payload} if payload else {})}
+        # A variant comes after its base; the shared resources come with any base.
+        root, bases = self.host.resource_root, []
+        for item in items:
+            if (
+                item.base
+                and item.base not in bases
+                and (not item.variant or base_models.installed_base(root, item.base) is None)
+            ):
+                bases.append(item.base)
+        if bases:
+            payload = {
+                "kind": "resources",
+                "bases": bases,
+                **({"then": payload} if payload else {}),
+            }
         # A source checkout installs add-ons here; a package already carries them.
         if missing := asr.missing_addons(backends):
             payload = {"kind": "addon", "keys": missing, **({"then": payload} if payload else {})}
@@ -585,11 +607,19 @@ class GuidePage(QWidget):
         """Every downloaded model into one zip, for someone who cannot download."""
         if self.host.tasks.busy:
             raise BusinessError(t("asr.wait_for_the_running_task"))
-        items = [item for item in model_files.downloads() if item.installed()]
-        if not items:
+        items = [item for item in self.downloads() if item.installed()]
+        imported = [b for b in self.host.bases() if b.source == "imported"]
+        if not items and not imported:
             raise BusinessError(t("models.nothing_to_export"))
-        size = sum(item.size for item in items)
-        names = fmt("\n".join(f"· {item.title}" for item in items), "", -1)
+        size = sum(item.size for item in items) + sum(
+            Path(b.checkpoint).stat().st_size for b in imported
+        )
+        # The shared resources travel with any base; the default base's line counts them.
+        keys = {item.key for item in items}
+        if model_files.SPEECH not in keys and (imported or any(item.base for item in items)):
+            size += sum(model.size for model in model_files.pinned_models())
+        titles = [str(item.title) for item in items] + [b.name for b in imported]
+        names = fmt("\n".join(f"· {title}" for title in titles), "", -1)
         if not self.host.confirm(
             t("models.export_title"),
             t("models.export_message", names=names, size=human_size(size)),
@@ -607,7 +637,7 @@ class GuidePage(QWidget):
             self.host.tasks.start(
                 {
                     "kind": "export_models",
-                    "keys": [item.key for item in items],
+                    "keys": [item.key for item in items] + [f"imported:{b.id}" for b in imported],
                     "destination": str(path),
                 }
             )
@@ -624,7 +654,7 @@ class GuidePage(QWidget):
         guide = task["kind"] in GUIDE_TASKS and self.host.tasks.busy
         if guide and task.get("item") in self.rows:
             # A progress step: only the line being downloaded and the summary change.
-            item = model_files.download_for(task["item"])
+            item = self.download_for(task["item"])
             self.refresh_model(item, task, True, installed=False)
         elif not (step and task["kind"] in {"import_models", "export_models"}):
             # Copying packages names no line; the lines change when it ends.
@@ -634,9 +664,7 @@ class GuidePage(QWidget):
     def task_finished(self, task):
         if task["kind"] not in GUIDE_TASKS:
             return
-        unfinished = [
-            key for key in self.downloading if not model_files.download_for(key).installed()
-        ]
+        unfinished = [key for key in self.downloading if not self.download_for(key).installed()]
         if task["status"] in {"failed", "interrupted"}:
             failed = task.get("item") if task.get("item") in self.rows else None
             for key in [failed] if failed else unfinished:
@@ -657,7 +685,11 @@ class GuidePage(QWidget):
             )
         if task["kind"] == "import_models" and task["status"] == "completed":
             result = task.get("result") or {}
-            names = [str(model_files.download_for(key).title) for key in result.get("complete", [])]
+            names = [
+                str(self.download_for(key).title)
+                for key in result.get("complete", [])
+                if not key.startswith("imported:")
+            ]
             note = t(
                 "guide.import_result",
                 imported=len(result.get("imported", [])),

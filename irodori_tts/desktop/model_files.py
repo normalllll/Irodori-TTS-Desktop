@@ -2,9 +2,11 @@
 
 The models are grouped for the onboarding page: required (no speech and no training without
 them), recommended (automatic transcription, which users without transcripts depend on) and
-optional. A user who cannot download can import files copied from someone else's computer;
-they are accepted only when name, size and SHA-256 match the pinned revision, and are placed
-in the download cache exactly as a download would place them.
+optional. A user who cannot download can import files copied from someone else's computer.
+Pinned files (codec, watermark, transcription models) are accepted only when name, size and
+SHA-256 match the pinned revision; base model files follow their repository's latest commit
+and are accepted when they match the record of the package that carries them. Both are
+placed exactly as a download or an import would place them.
 """
 
 from __future__ import annotations
@@ -25,16 +27,8 @@ from pathlib import Path
 from irodori_tts.desktop.messages import BusinessError, Message, fmt, t
 from irodori_tts.task_control import check_cancel
 
-from . import ASR_DEFAULT_CHECK, ASR_DEFAULT_MAIN, asr
+from . import ASR_DEFAULT_CHECK, ASR_DEFAULT_MAIN, asr, base_models
 from .resources import (
-    FAST_FILES,
-    FAST_MODEL,
-    FAST_REPO,
-    FAST_REVISION,
-    LOW_VRAM_FILES,
-    LOW_VRAM_MODEL,
-    LOW_VRAM_REPO,
-    LOW_VRAM_REVISION,
     RESOURCE_SPEC,
     ModelSpec,
     cached_snapshot,
@@ -49,14 +43,14 @@ CHUNK = 4 * 1024**2
 
 @cache
 def load_pins() -> dict:
-    """{repo: {"revision", "files": {name: {"size", "sha256"}}}} for every model file."""
+    """{repo: {"revision", "files": {name: {"size", "sha256"}}}} for every pinned model file."""
     if not PINS_PATH.is_file():
         return {}
     return json.loads(PINS_PATH.read_text(encoding="utf-8"))["repos"]
 
 
 def pinned_models() -> list[ModelSpec]:
-    """The speech resources (model, codec, watermark) as model specs."""
+    """The pinned resources every base model needs (codec, watermark) as model specs."""
     pins = load_pins()
     specs = []
     for spec in RESOURCE_SPEC.values():
@@ -67,23 +61,9 @@ def pinned_models() -> list[ModelSpec]:
     return specs
 
 
-def _generation_model(repo: str, revision: str, files: tuple[str, ...]) -> ModelSpec:
-    pinned = load_pins().get(repo, {}).get("files", {})
-    size = sum(pinned.get(name, {}).get("size", 0) for name in files)
-    return ModelSpec(repo, revision, files, size)
-
-
-def low_vram_model() -> ModelSpec:
-    return _generation_model(LOW_VRAM_REPO, LOW_VRAM_REVISION, LOW_VRAM_FILES)
-
-
-def fast_model() -> ModelSpec:
-    return _generation_model(FAST_REPO, FAST_REVISION, FAST_FILES)
-
-
 @dataclass(frozen=True)
 class Download:
-    """One choice on the onboarding page."""
+    """One choice on the onboarding page: pinned models, a catalog base, or a variant."""
 
     key: str
     title: str | Message
@@ -91,49 +71,95 @@ class Download:
     reason: Message
     models: tuple[ModelSpec, ...]
     backend: str | None = None  # the transcription backend it provides
+    base: str | None = None  # the catalog base it provides, or whose variant it provides
+    variant: str | None = None
+    base_size: int = 0  # the base or variant's bytes, which no pin records
+    root: Path | None = None  # the resource folder whose base registry tells what is installed
 
     @property
     def size(self) -> int:
-        return sum(model.size for model in self.models)
+        return sum(model.size for model in self.models) + self.base_size
+
+    def base_installed(self) -> bool:
+        if self.base is None:
+            return True
+        installed = base_models.installed_base(self.root, self.base) if self.root else None
+        if installed is None:
+            return False
+        return self.variant is None or self.variant in installed.variants
 
     def installed(self) -> bool:
-        return all(cached_snapshot(model) is not None for model in self.models)
+        return self.base_installed() and all(
+            cached_snapshot(model) is not None for model in self.models
+        )
 
     def missing_size(self) -> int:
-        return sum(model.size for model in self.models if cached_snapshot(model) is None)
+        pinned = sum(model.size for model in self.models if cached_snapshot(model) is None)
+        return pinned + (0 if self.base_installed() else self.base_size)
 
 
 SPEECH = "speech"
-LOW_VRAM = "low-vram"
+LOW_VRAM = "low_vram"
 FAST = "fast"
-# The generation models a setting can choose instead of the speech model.
+# The generation variants a setting can choose instead of a base's standard checkpoint.
 GENERATION_MODELS = (LOW_VRAM, FAST)
 
 
-def downloads() -> list[Download]:
-    items = [
-        Download(
-            SPEECH,
-            t("models.speech_title"),
-            "required",
-            t("models.speech_reason"),
-            tuple(pinned_models()),
-        ),
-        Download(
-            LOW_VRAM,
-            t("models.low_vram_title"),
-            "optional",
-            t("models.low_vram_reason"),
-            (low_vram_model(),),
-        ),
-        Download(
-            FAST,
-            t("models.fast_title"),
-            "optional",
-            t("models.fast_reason"),
-            (fast_model(),),
-        ),
-    ]
+def base_key(base_id: str) -> str:
+    """The download of a catalog base; the default base is the speech download."""
+    entry = base_models.catalog_base(base_id)
+    return SPEECH if entry is not None and entry.default else f"base:{base_id}"
+
+
+def variant_key(base_id: str, variant: str) -> str:
+    return f"variant:{base_id}:{variant}"
+
+
+def _base_downloads(root: Path | None) -> list[Download]:
+    items = []
+    for entry in base_models.CATALOG:
+        reason = (
+            t("models.speech_reason")
+            if entry.default
+            else t("models.large_reason", url=fmt(entry.license_url or "", "", -1))
+        )
+        items.append(
+            Download(
+                base_key(entry.id),
+                t("models.base_title", name=fmt(entry.name, "", -1)),
+                "required" if entry.default else "optional",
+                reason,
+                tuple(pinned_models()) if entry.default else (),
+                base=entry.id,
+                base_size=entry.size,
+                root=root,
+            )
+        )
+        name = fmt(entry.name, "", -1)
+        for variant in entry.variants:
+            if variant.key == LOW_VRAM:
+                title, why = t("models.low_vram_title", name=name), t("models.low_vram_reason")
+            else:
+                title, why = t("models.fast_title", name=name), t("models.fast_reason")
+            items.append(
+                Download(
+                    variant_key(entry.id, variant.key),
+                    title,
+                    "optional",
+                    why,
+                    (),
+                    base=entry.id,
+                    variant=variant.key,
+                    base_size=variant.size,
+                    root=root,
+                )
+            )
+    return items
+
+
+def downloads(root: Path | None = None) -> list[Download]:
+    """Every download, with root the resource folder whose base registry is consulted."""
+    items = _base_downloads(root)
     for backend in asr.BACKENDS:
         if backend.key == ASR_DEFAULT_MAIN:
             tier, reason = "recommended", t("models.main_reason")
@@ -147,26 +173,18 @@ def downloads() -> list[Download]:
     return items
 
 
-def download_for(key: str) -> Download:
-    return next(item for item in downloads() if item.key == key)
+def download_for(key: str, root: Path | None = None) -> Download:
+    return next(item for item in downloads(root) if item.key == key)
 
 
-def speech_ready() -> bool:
-    return download_for(SPEECH).installed()
+def shared_ready() -> bool:
+    """Whether the pinned resources every base needs are in the cache."""
+    return all(cached_snapshot(model) is not None for model in pinned_models())
 
 
-def low_vram_checkpoint() -> str:
-    """The generation model of the low video memory setting, once it is downloaded."""
-    return str(snapshot_path(LOW_VRAM_REPO, LOW_VRAM_REVISION, LOW_VRAM_MODEL))
-
-
-def fast_checkpoint() -> str:
-    """The generation model of the fast setting, once it is downloaded."""
-    return str(snapshot_path(FAST_REPO, FAST_REVISION, FAST_MODEL))
-
-
-def generation_checkpoint(key: str) -> str:
-    return low_vram_checkpoint() if key == LOW_VRAM else fast_checkpoint()
+def speech_ready(root: Path) -> bool:
+    """At least one base model is installed, with the resources every base needs."""
+    return bool(base_models.load_registry(root)) and shared_ready()
 
 
 def snapshot_path(repo: str, revision: str, filename: str) -> Path:
@@ -246,6 +264,17 @@ class _SevenZipStream:
                 reason=fmt(lines[-1] if lines else "", "", -1),
             )
         )
+
+    def read(self, name: str) -> bytes | None:
+        """One member's bytes, extracted on its own (the package manifest)."""
+        if not any(entry == name for entry, _size in self.entries):
+            return None
+        result = subprocess.run(
+            [self.program, "e", "-so", "-y", "-sccUTF-8", str(self.source), name],
+            capture_output=True,
+            creationflags=NO_WINDOW,
+        )
+        return result.stdout if not result.returncode else None
 
     def files(self):
         return [
@@ -341,33 +370,124 @@ def _copy(opener, target: Path, *, cancel, progress) -> str:
     return sha.hexdigest()
 
 
+def _package_manifest(source: Path) -> dict:
+    """The manifest a package written by export_model_files carries; {} for a plain folder or
+    an archive without one."""
+    raw = None
+    try:
+        if source.is_dir():
+            path = source / MANIFEST
+            raw = path.read_bytes() if path.is_file() else None
+        elif source.is_file() and _is_7z(source):
+            raw = _SevenZipStream(source).read(MANIFEST)
+        elif zipfile.is_zipfile(source):
+            with zipfile.ZipFile(source) as archive:
+                if MANIFEST in archive.namelist():
+                    raw = archive.read(MANIFEST)
+        manifest = json.loads(raw.decode("utf-8")) if raw else {}
+    except (OSError, ValueError, UnicodeDecodeError):
+        return {}
+    return manifest if isinstance(manifest, dict) else {}
+
+
+def _package_target(root: Path, arcname: str) -> Path | None:
+    """Where a base file of a package belongs: the download cache for a catalog base, the
+    resource folder for an imported one."""
+    parts = Path(arcname).parts
+    if not parts or ".." in parts or Path(arcname).is_absolute():
+        return None
+    if parts[0].startswith("models--"):
+        return hf_home() / "hub" / arcname
+    if parts[0] == base_models.IMPORTED_FOLDER:
+        return Path(root) / arcname
+    return None
+
+
 def import_model_files(
     source: Path,
+    root: Path,
     *,
     cancel: Callable[[], bool] | None = None,
     progress: Callable[[int, int], None] | None = None,
 ) -> dict:
-    """Place every file of source that is a pinned model file into the download cache.
+    """Place every file of source that is a known model file where it belongs, and register
+    the base models the package carries.
 
-    Files are recognised by name and size, then accepted only with the pinned SHA-256. A file
-    the cache already has is left alone. Returns what was imported, already present, rejected,
-    and which downloads are now complete."""
-    pins = load_pins()
-    by_name: dict[tuple[str, int], list[tuple[str, str, str, str]]] = {}
-    for repo, entry in pins.items():
+    Pinned files are recognised by name and size, then accepted only with the pinned SHA-256.
+    Base model files are accepted with the SHA-256 the package's own manifest records for
+    them. A file already in place is left alone. Returns what was imported, already present,
+    rejected, and which downloads are now complete."""
+    by_name: dict[tuple[str, int], list[tuple[Path, str, str, str]]] = {}
+    for repo, entry in load_pins().items():
         for filename, info in entry["files"].items():
             key = (Path(filename).name, info["size"])
-            by_name.setdefault(key, []).append((repo, entry["revision"], filename, info["sha256"]))
+            target = snapshot_path(repo, entry["revision"], filename)
+            by_name.setdefault(key, []).append(
+                (target, f"{repo}/{filename}", info["sha256"], filename)
+            )
+    bases = _package_manifest(source).get("bases")
+    bases = bases if isinstance(bases, dict) else {}
+    # An installed base stays as it is: a package must not move it to another commit (and
+    # leave the newer one's files orphaned), nor replace an imported one.
+    installed = {base.id for base in base_models.load_registry(root)}
+    kept = sorted(base_id for base_id in bases if base_id in installed)
+    bases = {base_id: record for base_id, record in bases.items() if base_id not in installed}
+    for record in bases.values():
+        files = record.get("files") if isinstance(record, dict) else None
+        for arcname, info in (files if isinstance(files, dict) else {}).items():
+            target = _package_target(root, arcname)
+            if target is None or not isinstance(info, dict):
+                continue
+            key = (Path(arcname).name, info.get("size"))
+            by_name.setdefault(key, []).append((target, arcname, info.get("sha256"), arcname))
     with _source_files(source, cancel) as files:
         candidates = [c for c in files if (Path(c[0]).name, c[1]) in by_name]
         imported, present, rejected = _import(candidates, by_name, cancel, progress)
-    complete = [item.key for item in downloads() if item.installed()]
+    registered = _register_package_bases(root, bases)
+    complete = [item.key for item in downloads(root) if item.installed()]
+    complete += [f"imported:{base.id}" for base in registered if base.source == "imported"]
     return {
         "imported": imported,
-        "present": present,
+        "present": present + [f"base:{base_id}" for base_id in kept],
+        "kept": kept,
         "rejected": [(name, str(reason)) for name, reason in rejected],
         "complete": complete,
     }
+
+
+def _register_package_bases(root: Path, bases: dict) -> list:
+    """Register each base of a package whose files are now all in place."""
+    registered = []
+    for base_id, record in bases.items():
+        try:
+            targets = {arcname: _package_target(root, arcname) for arcname in record["files"]}
+            if any(path is None or not path.is_file() for path in targets.values()):
+                continue
+            checkpoint = targets[record["checkpoint"]]
+            architecture = base_models.read_architecture(checkpoint)
+            if architecture is None:
+                continue
+            variants = {
+                key: targets[arcname]
+                for key, arcname in (record.get("variants") or {}).items()
+                if arcname in targets
+            }
+            catalog = record.get("source") == "catalog" and base_models.catalog_base(base_id)
+            base = base_models.InstalledBase(
+                id=str(base_id),
+                name=str(record.get("name") or base_id),
+                source="catalog" if catalog else "imported",
+                repo=record.get("repo"),
+                revision=record.get("revision"),
+                checkpoint=checkpoint,
+                architecture=architecture,
+                variants=variants,
+            )
+        except (KeyError, TypeError, AttributeError):
+            continue
+        base_models.save_base(root, base)
+        registered.append(base)
+    return registered
 
 
 def _import(candidates, by_name, cancel, progress):
@@ -377,9 +497,10 @@ def _import(candidates, by_name, cancel, progress):
     for name, size, opener in candidates:
         check_cancel(cancel)
         matches = by_name[(Path(name).name, size)]
-        # Prefer the pin whose path the source shares ("tokenizer/tokenizer.json").
-        matches.sort(key=lambda m: not name.replace("\\", "/").endswith(m[2]))
-        waiting = [m for m in matches if not snapshot_path(m[0], m[1], m[2]).is_file()]
+        path = name.replace("\\", "/")
+        # Prefer the file whose path the source shares ("tokenizer/tokenizer.json").
+        matches.sort(key=lambda m: not path.endswith(m[3]))
+        waiting = [m for m in matches if not m[0].is_file()]
         if not waiting:
             present.append(name)
             done += size
@@ -396,23 +517,22 @@ def _import(candidates, by_name, cancel, progress):
             sha = _copy(opener, staging, cancel=cancel, progress=moved)
             # Models can share a file (whisper-large-v3 and anime-whisper share their
             # tokenizer files); every one still waiting for it gets a copy.
-            targets = [m for m in waiting if m[3] == sha]
+            targets = [m for m in waiting if m[2] == sha]
             if not targets:
-                if any(m[3] == sha for m in matches):
+                if any(m[2] == sha for m in matches):
                     present.append(name)
-                elif any(name.replace("\\", "/").endswith(m[2]) for m in matches):
-                    # It stands where a pinned file belongs: another version, or damaged.
+                elif any(path.endswith(m[3]) for m in matches):
+                    # It stands where a known file belongs: another version, or damaged.
                     rejected.append((name, t("models.import_hash_mismatch")))
                 # Otherwise an unrelated file that only shares a name and size is not ours.
                 continue
-            for index, (repo, revision, filename, _) in enumerate(targets):
-                target = snapshot_path(repo, revision, filename)
+            for index, (target, label, _sha, _suffix) in enumerate(targets):
                 target.parent.mkdir(parents=True, exist_ok=True)
                 if index == len(targets) - 1:
                     staging.replace(target)
                 else:
                     shutil.copyfile(staging, target)
-                imported.append(f"{repo}/{filename}")
+                imported.append(label)
         finally:
             staging.unlink(missing_ok=True)
     return imported, present, rejected
@@ -421,51 +541,129 @@ def _import(candidates, by_name, cancel, progress):
 # ----- export -----
 
 
+def _arcname(repo: str, revision: str, filename: str) -> str:
+    return f"models--{repo.replace('/', '--')}/snapshots/{revision}/{filename}"
+
+
+def _base_entries(base: base_models.InstalledBase, variants) -> tuple[list, dict]:
+    """[(arcname, path)] of a base and the chosen variants, and its package record without
+    the file hashes, which are computed while the files are written."""
+    record = {**base_models.base_record(base), "source": base.source, "files": {}, "variants": {}}
+    folder = Path(base.checkpoint).parent
+    entry = base.catalog
+    if entry is None:
+        names = ["model.safetensors"] + [
+            path.relative_to(folder).as_posix()
+            for path in sorted((folder / "tokenizer").rglob("*"))
+            if path.is_file()
+        ]
+        prefix = f"{base_models.IMPORTED_FOLDER}/{base.id}"
+        record["checkpoint"] = f"{prefix}/model.safetensors"
+        return [(f"{prefix}/{name}", folder / name) for name in names], record
+    entries = [(_arcname(entry.repo, base.revision, name), folder / name) for name in entry.files]
+    record["checkpoint"] = _arcname(entry.repo, base.revision, "model.safetensors")
+    for key in variants:
+        variant = entry.variant(key)
+        path = base.variants.get(key)
+        if variant is None or path is None:
+            continue
+        # The cache keeps the file at snapshots/<commit>/<model_file>.
+        commit = Path(path).parents[len(Path(variant.model_file).parts) - 1]
+        entries += [
+            (_arcname(variant.repo, commit.name, name), commit / name) for name in variant.files
+        ]
+        record["variants"][key] = _arcname(variant.repo, commit.name, variant.model_file)
+    return entries, record
+
+
 def export_model_files(
     keys: list[str],
     destination: Path,
+    root: Path,
     *,
     cancel: Callable[[], bool] | None = None,
     progress: Callable[[int, int], None] | None = None,
 ) -> dict:
     """A zip of the downloaded files of these models, laid out like the download cache, with a
-    manifest. Another user imports it with import_model_files."""
+    manifest. Another user imports it with import_model_files. Keys are download keys, or
+    "imported:<id>" for an imported base."""
     pins = load_pins()
-    entries = []
+    entries = []  # (arcname, path, pinned model or None, base id or None)
+    bases: dict[str, tuple] = {}
     for key in keys:
-        for model in download_for(key).models:
+        if key.startswith("imported:"):
+            base = base_models.installed_base(root, key.split(":", 1)[1])
+            if base is not None:
+                bases.setdefault(base.id, (base, set()))
+            continue
+        item = download_for(key, root)
+        for model in item.models:
             folder = cached_snapshot(model)
             if folder is None:
                 raise BusinessError(t("models.export_not_downloaded", name=fmt(model.repo, "", -1)))
-            for filename in model.files:
-                entries.append((model, filename, folder / filename))
-    total = sum(path.stat().st_size for _, _, path in entries)
+            entries += [
+                (_arcname(model.repo, model.revision, name), folder / name, model, None)
+                for name in model.files
+            ]
+        if item.base is not None:
+            base = base_models.installed_base(root, item.base)
+            if base is None or (item.variant and item.variant not in base.variants):
+                raise BusinessError(t("models.export_not_downloaded", name=fmt(item.title, "", -1)))
+            chosen = bases.setdefault(base.id, (base, set()))[1]
+            if item.variant:
+                chosen.add(item.variant)
+    if bases:
+        # No base speaks without the codec and the watermark: a pack carrying one carries them.
+        for model in pinned_models():
+            folder = cached_snapshot(model)
+            if folder is None:
+                raise BusinessError(t("models.export_not_downloaded", name=fmt(model.repo, "", -1)))
+            entries += [
+                (_arcname(model.repo, model.revision, name), folder / name, model, None)
+                for name in model.files
+            ]
+    records = {}
+    for base, variants in bases.values():
+        files, records[base.id] = _base_entries(base, sorted(variants))
+        entries += [(arcname, path, None, base.id) for arcname, path in files]
+    unique = {}
+    for entry in entries:
+        unique.setdefault(entry[0], entry)
+    total = sum(entry[1].stat().st_size for entry in unique.values())
     done = 0
     temporary = destination.with_name(f".{destination.name}.{identity()}.partial")
     try:
         # Model weights do not compress; storing them keeps export and import fast.
         with zipfile.ZipFile(temporary, "w", zipfile.ZIP_STORED, allowZip64=True) as archive:
-            manifest = {"format_version": 1, "models": {}}
-            for model, filename, path in entries:
-                arcname = (
-                    f"models--{model.repo.replace('/', '--')}/snapshots/{model.revision}/{filename}"
-                )
+            manifest = {"format_version": 1, "models": {}, "bases": records}
+            for arcname, path, model, base_id in unique.values():
+                sha = hashlib.sha256()
                 with path.open("rb") as stream, archive.open(arcname, "w", force_zip64=True) as out:
                     while chunk := stream.read(CHUNK):
                         check_cancel(cancel)
+                        sha.update(chunk)
                         out.write(chunk)
                         done += len(chunk)
                         if progress:
                             progress(done, total)
-                info = manifest["models"].setdefault(
-                    model.repo, {"revision": model.revision, "files": {}}
-                )
-                info["files"][filename] = pins.get(model.repo, {}).get("files", {}).get(filename)
+                if model is not None:
+                    filename = arcname.split("/", 3)[3]
+                    info = manifest["models"].setdefault(
+                        model.repo, {"revision": model.revision, "files": {}}
+                    )
+                    info["files"][filename] = (
+                        pins.get(model.repo, {}).get("files", {}).get(filename)
+                    )
+                else:
+                    records[base_id]["files"][arcname] = {
+                        "size": path.stat().st_size,
+                        "sha256": sha.hexdigest(),
+                    }
             archive.writestr(MANIFEST, json.dumps(manifest, ensure_ascii=False, indent=1))
         temporary.replace(destination)
     finally:
         temporary.unlink(missing_ok=True)
-    return {"destination": str(destination), "bytes": total, "files": len(entries)}
+    return {"destination": str(destination), "bytes": total, "files": len(unique)}
 
 
 # Memory sizes graphics cards are sold with, in GB.
