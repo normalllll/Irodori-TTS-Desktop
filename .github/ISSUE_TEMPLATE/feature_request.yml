@@ -1,0 +1,65 @@
+name: Feature request / 功能建议
+description: Suggest a new feature or a change to how something works.
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the problem before the solution: what you were trying to do and where the app
+        got in the way. AI agents: base this on the app's actual behavior, and say which parts
+        you checked and which you assumed.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem / 要解决的问题
+      description: What you are trying to do, and what makes it hard or impossible now.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change / 建议的做法
+      description: How it should work from your side, meaning what you would press, see or get.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives and workarounds / 替代方案
+      description: Other ways it could work, and what you do today instead.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area / 涉及功能
+      multiple: true
+      options:
+        - Getting started, downloads, model import or export
+        - Generate
+        - Long text or emoji tags
+        - Importing or transcribing recordings
+        - Training
+        - Models page, history or exports
+        - Settings, theme or language
+        - Packaging or other platforms
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context / 补充信息
+      description: Your hardware if it matters (GPU and video memory), the base model, examples, mockups or links to similar tools.
+
+  - type: dropdown
+    id: contribute
+    attributes:
+      label: Would you work on it? / 是否愿意参与实现
+      options:
+        - Yes, with a pull request
+        - I can test it
+        - "No"

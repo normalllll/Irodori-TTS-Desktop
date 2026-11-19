@@ -1,0 +1,147 @@
+name: Bug report / 问题报告
+description: Something fails, crashes, freezes or gives a wrong result.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Most of what we need is one click away in the app:
+        **Settings → Runtime environment → Copy** (设置 → 运行环境 → 复制) and
+        **Settings → Logs and diagnostics → Export diagnostics** (设置 → 日志与诊断 → 导出诊断包).
+
+        Filing this with an AI agent? Have it fill every field from what it can actually observe:
+        run the steps, quote errors and logs verbatim, give exact versions and paths, and say
+        plainly which parts it could not check.
+
+        Problems with the speech model itself (pronunciation, voice quality, the trainer's
+        numerics) may belong to [Irodori-TTS](https://github.com/Aratako/Irodori-TTS); if unsure,
+        report here.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened / 发生了什么
+      description: What you saw, including the exact text of any error message.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected / 期望的结果
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce / 复现步骤
+      description: From starting the app, as numbered steps. Name the page, button and model used.
+      placeholder: |
+        1. Open Models, select "my-voice"
+        2. Press Import recordings and choose a folder of 40 WAV files
+        3. ...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: frequency
+    attributes:
+      label: How often / 出现频率
+      options:
+        - Every time
+        - Sometimes
+        - Happened once
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: App version / 版本
+      description: From the package file name (for example 0.1.1), or `git rev-parse --short HEAD` when running from source.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install
+    attributes:
+      label: How you run it / 运行方式
+      options:
+        - Portable package
+        - From source
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area / 涉及功能
+      multiple: true
+      options:
+        - Startup or the package
+        - Getting started, downloads, model import or export
+        - Generate
+        - Long text or emoji tags
+        - Importing or transcribing recordings
+        - Training
+        - Models page, history or exports
+        - Settings, theme or language
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: base
+    attributes:
+      label: Base model / 底模
+      multiple: true
+      options:
+        - v4.1 Small
+        - v4.1 Small (low video memory)
+        - v4.1 Small (fast, 4 steps)
+        - v4 Large
+        - v4 Large (low video memory)
+        - An imported base model
+        - Not related to a model
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Runtime environment / 运行环境
+      description: Paste from Settings → Runtime environment → Copy. If the app does not start, give the Windows version, GPU, driver version and free disk space instead.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs and errors / 日志与错误
+      description: |
+        - A failed task: Settings → Logs and diagnostics → Task log, the lines around the error.
+        - The app closes by itself: Windows Event Viewer → Windows Logs → Application, the "Application Error" entry for Irodori-TTS-Desktop.exe or python.exe. Copy its faulting application, faulting module and exception code.
+        - From source: the console output.
+      render: text
+
+  - type: textarea
+    id: attachments
+    attributes:
+      label: Diagnostics and screenshots / 诊断包与截图
+      description: Drop the zip from Export diagnostics here, and screenshots or a recording if the problem is visible. The zip holds no recordings, transcripts or model weights; turn on raw logs only if you are fine sharing the paths and text in them.
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else / 其他信息
+      description: What changed recently, workarounds you found, and software that hooks into other programs (antivirus, file manager or Explorer extensions, screen overlays, other Qt applications). Mention non-ASCII characters in the install or data path, and your recordings' format, count and length when the problem is with them.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting / 提交前
+      options:
+        - label: I searched the existing issues for this problem.
+          required: true
+        - label: The report contains no access tokens, and no recordings or text I may not share.
+          required: true
