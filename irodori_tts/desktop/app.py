@@ -1308,6 +1308,10 @@ def main():
         # Its own taskbar identity: without it the taskbar groups the window under Python
         # and shows Python's icon.
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_ID)
+    # Qt's own file dialogs. The Windows ones load Explorer extensions into this process,
+    # and an extension built on another Qt 6 resolves its Qt6Widgets.dll to ours (or fails
+    # to find one) and takes the whole application down.
+    QApplication.setAttribute(Qt.ApplicationAttribute.AA_DontUseNativeDialogs)
     app = QApplication(sys.argv[:1])
     app.setWindowIcon(app_icon())
     app.setOrganizationName("Irodori")
