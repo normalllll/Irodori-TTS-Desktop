@@ -1380,7 +1380,9 @@ class Table(TableView):
         row = self.rows_model.rows[index.row()]
         key = self.rows_model.columns[index.column()][0]
         if key in row.get("icons", {}) and row["id"] in self.requested_ids:
-            self.icon_clicked.emit(row, key)
+            # Reached from QAbstractItemView.mouseReleaseEvent, which goes on using the view
+            # after this returns; an icon can open a confirmation dialog and rebuild the page.
+            QTimer.singleShot(0, self, lambda: self.icon_clicked.emit(row, key))
 
     def set_icons(self, key, icons, tips=None):
         """Show icons[row id] in column key of each row (none for a missing id)."""
@@ -2254,6 +2256,18 @@ def inner_scroll(content):
     return area
 
 
+def _run_after_click(action, owner, callback):
+    """Run a menu entry's callback once the click that chose it has been handled.
+
+    The menu triggers its action from inside its list view's mouseReleaseEvent, after it has
+    closed (which schedules a pop-up menu's deletion). A callback that opens a modal dialog
+    runs a nested event loop there; that loop deletes the menu, and when the dialog closes
+    Qt finishes mouseReleaseEvent on the freed view and the process dies with an access
+    violation. Whether it does depends on whether the freed memory has been reused yet.
+    """
+    action.triggered.connect(lambda _checked=False: QTimer.singleShot(0, owner, callback))
+
+
 def menu_button(text, entries, *, icon=None):
     """A dropdown button; entries are (text, callback) pairs."""
     widget = bind(DropDownPushButton(str(text)), text)
@@ -2264,7 +2278,7 @@ def menu_button(text, entries, *, icon=None):
     for title, callback in entries:
         action = Action(str(title))
         bind(action, title)
-        action.triggered.connect(callback)
+        _run_after_click(action, widget, callback)
         menu.addAction(action)
     widget.setMenu(menu)
     return widget
@@ -2278,7 +2292,7 @@ def show_menu(anchor, entries, *, at=None):
     for title, callback, enabled in entries:
         action = Action(str(title))
         action.setEnabled(enabled)
-        action.triggered.connect(callback)
+        _run_after_click(action, anchor, callback)
         menu.addAction(action)
     menu.exec(at or anchor.mapToGlobal(QPoint(0, anchor.height())))
 

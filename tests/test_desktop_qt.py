@@ -465,6 +465,44 @@ class ReviewFixTests(unittest.TestCase):
         self.windows.append(window)
         return window
 
+    def test_a_menu_entry_runs_after_the_click_that_chose_it(self):
+        from PySide6.QtCore import Qt
+        from PySide6.QtTest import QTest
+
+        from irodori_tts.desktop.widgets import AcrylicMenu, show_menu
+
+        anchor = QWidget()
+        anchor.resize(200, 40)
+        anchor.show()
+        calls = []
+        show_menu(anchor, [("Open", lambda: calls.append("ran"), True)])
+        menu = anchor.findChildren(AcrylicMenu)[-1]
+        view = menu.view
+        item = next(view.item(i) for i in range(view.count()) if view.item(i).text() == "Open")
+        QTest.mouseClick(
+            view.viewport(),
+            Qt.MouseButton.LeftButton,
+            Qt.KeyboardModifier.NoModifier,
+            view.visualItemRect(item).center(),
+        )
+        # An entry that opens a modal dialog must not run inside the menu's own click: the
+        # dialog's event loop deletes the closed menu while the click is still on its stack.
+        self.assertEqual(calls, [])
+        deadline = time.monotonic() + 5
+        while not calls and time.monotonic() < deadline:
+            self.app.processEvents()
+        self.assertEqual(calls, ["ran"])
+
+    def test_a_table_icon_click_is_announced_after_the_click(self):
+        table = Table([("play", "", 44), ("name", "name", 100)])
+        table.update_rows([{"id": "a", "name": "a", "icons": {"play": FluentIcon.PLAY}}])
+        seen = []
+        table.icon_clicked.connect(lambda row, key: seen.append(key))
+        table.clicked.emit(table.rows_model.index(0, 0))
+        self.assertEqual(seen, [])
+        self.app.processEvents()
+        self.assertEqual(seen, ["play"])
+
     def test_a_formatted_plural_count_renders_through_qt(self):
         from irodori_tts.desktop.i18n import locale_manager
         from irodori_tts.desktop.training_page import rough_duration
